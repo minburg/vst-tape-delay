@@ -15,6 +15,7 @@ nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["s
 nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 parking_lot = "0.12.5"
 rand = "0.8.5"
+image = "0.24"
 
 [workspace]
 members = [

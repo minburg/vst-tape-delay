@@ -1,15 +1,21 @@
 .main-gui {
-    background-color: #1e1e1e;
+    /*background-color: #1e1e1e;*/
+    background-image: url("ghost.png");
+    background-size: cover;
 }
 
 .knob-section {
-    background-color: #280c55;
+    background-color: rgba(40, 12, 85, 0);
     /*child-space: 50px;*/
     width: 1s;
+    col-between: 60px;
+    /* This adds padding to the far left and far right of the whole row */
+    child-left: 60px;
+    child-right: 60px;
+    child-bottom: 20px;
 }
 
 .title-section {
-    background-color: #512540;
     width: 1s;
     height: 180px;
 }
@@ -27,24 +33,31 @@
     width: 1s;
     /*child_space: 1s;*/
     /*height: 1s;*/
-    background-color: #cfb969;
-    border-radius: 100px;
-    border-width: 30px;
-    border-color: #344259;
+    background-color: rgba(0, 0, 0, 0.47);
+    border-radius: 80px;
+    border-width: 3px;
+    border-color: rgb(126, 126, 126);
 }
 
 .portion {
     width: 1s;
-    background-color: #344259;
+    background-color: rgba(52, 66, 89, 0);
     border-width: 0px;
     border-color: #934aff;
 }
 
 .knob_arc {
-    background-color: #9a56bd;
+    background-color: #74355C;
+    color: #d28819;
+}
+
+.knob_hitbox {
+    background-color: rgba(0, 0, 0, 0.5);
+    border-radius: 50%;
 }
 
 .param-label {
-    color: #000000;
+    color: #d28819;
     font-size: 40.0;
+    font-family: "Orbitron";
 }

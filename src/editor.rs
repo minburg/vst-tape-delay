@@ -1,3 +1,4 @@
+use crate::nih_error;
 use crate::nih_log;
 use nih_plug_vizia::assets::register_noto_sans_light;
 use std::sync::Arc;
@@ -5,6 +6,7 @@ use std::sync::Arc;
 use nih_plug::prelude::Editor;
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::{create_vizia_editor, ViziaState, ViziaTheming};
+use image::load_from_memory;
 
 use crate::TapeParams;
 
@@ -12,8 +14,11 @@ use self::param_knob::ParamKnob;
 
 mod param_knob;
 
+pub const ORBITRON_TTF: &[u8] = include_bytes!("./resource/Orbitron-Regular.ttf");
 pub const COMFORTAA_LIGHT_TTF: &[u8] = include_bytes!("./resource/Comfortaa-Light.ttf");
 pub const COMFORTAA: &str = "Comfortaa";
+
+const BG_IMAGE_BYTES: &[u8] = include_bytes!("./resource/ghost.png");
 
 #[derive(Lens)]
 struct Data {
@@ -36,7 +41,13 @@ pub(crate) fn create(
             register_noto_sans_light(cx);
 
             cx.add_font_mem(&COMFORTAA_LIGHT_TTF);
+            cx.add_font_mem(&ORBITRON_TTF);
             cx.set_default_font(&[COMFORTAA]);
+
+            match load_from_memory(BG_IMAGE_BYTES) {
+                Ok(img) => cx.load_image("ghost.png", img, ImageRetentionPolicy::Forever),
+                Err(e) => nih_error!("Failed to load image: {}", e),
+            }
 
             if let Err(e) = cx.add_stylesheet(include_style!("/src/resource/style.css")) {
                 nih_log!("CSS Error: {:?}", e);
@@ -72,7 +83,7 @@ pub(crate) fn create(
 
             }).width(Stretch(1.0))
                 .height(Stretch(1.0))
-                .child_space(Pixels(10.0))
+                // .child_space(Pixels(5.0))
                 .class("main-gui");
 
         })

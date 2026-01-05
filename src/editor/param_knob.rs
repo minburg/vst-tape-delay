@@ -56,17 +56,23 @@ impl ParamKnob {
                                 params_to_param(params).unmodulated_normalized_value()
                             }),
                             move |cx, lens| {
-                                ArcTrack::new(
-                                    cx,
-                                    centered,
-                                    Percentage(500.0),
-                                    Percentage(20.),
-                                    -150.,
-                                    150.,
-                                    KnobMode::Continuous,
-                                )
-                                    .value(lens)
-                                    .class("knob_arc")
+
+                                // A ZStack allows you to layer a "hit area" background and the visual arc
+                                ZStack::new(cx, |cx| {
+
+                                    // Transparent "Hit Surface" to capture mouse everywhere
+                                    Element::new(cx)
+                                        .width(Pixels(120.0))
+                                        .height(Pixels(120.0))
+                                        .class("knob_hitbox");
+
+                                    // Visual Arc
+                                    ArcTrack::new(cx, centered, Percentage(500.0), Percentage(20.), -150., 150., KnobMode::Continuous)
+                                        .value(lens).class("knob_arc");
+
+                                }).child_space(Stretch(1.0))
+                                    .width(Pixels(160.0))
+                                    .height(Pixels(160.0))
                             },
                         )
                             .space(Stretch(1.0))
