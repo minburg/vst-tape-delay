@@ -11,6 +11,9 @@ use self::param_knob::ParamKnob;
 
 mod param_knob;
 
+pub const COMFORTAA_LIGHT_TTF: &[u8] = include_bytes!("./resource/Comfortaa-Light.ttf");
+pub const COMFORTAA: &str = "Comfortaa";
+
 #[derive(Lens)]
 struct Data {
     tape_data: Arc<TapeParams>
@@ -19,7 +22,7 @@ struct Data {
 impl Model for Data {}
 
 pub(crate) fn default_state() -> Arc<ViziaState> {
-    ViziaState::new(|| (600, 600))
+    ViziaState::new(|| (1200, 800))
 }
 
 pub(crate) fn create(
@@ -29,6 +32,8 @@ pub(crate) fn create(
     create_vizia_editor(editor_state,
                         ViziaTheming::Custom, move |cx, _| {
 
+            cx.add_font_mem(&COMFORTAA_LIGHT_TTF);
+            cx.set_default_font(&[COMFORTAA]);
             cx.add_stylesheet(include_style!("/src/resource/style.css"))
                 .expect("Failed to add stylesheet");
 
@@ -37,9 +42,11 @@ pub(crate) fn create(
             }.build(cx);
 
             VStack::new(cx, |cx| {
-                Label::new(cx, "CONVOLUTION'S TAPE DELAY")
-                    .font_size(38.0).font_weight(FontWeightKeyword::Bold)
-                    .class("count");
+                HStack::new(cx, |cx| {
+                    Label::new(cx, "CONVOLUTION'S TAPE DELAY")
+                        .class("header-title");
+                }).child_space(Stretch(1.0))
+                    .class("title-section");
 
                 // Wrap knobs in a container that handles the centering
                 HStack::new(cx, |cx| {
@@ -49,7 +56,7 @@ pub(crate) fn create(
                         .width(Stretch(1.0));
                     ParamKnob::new(cx, Data::tape_data, |params| &params.mix, false)
                         .width(Stretch(1.0));
-                });
+                }).class("knob-section");
                     // .child_space(Stretch(1.0)); // This pushes all knobs to the center together
 
             }).class("main-gui");

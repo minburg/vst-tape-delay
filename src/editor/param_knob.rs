@@ -20,7 +20,7 @@ impl ParamKnob {
         params: L,
         params_to_param: FMap,
         centered: bool,
-    ) -> Handle<Self>
+    ) -> Handle<'_, Self>
     where
         L: Lens<Target = Params> + Clone + Copy,
         Params: 'static,
@@ -47,7 +47,7 @@ impl ParamKnob {
                                     .to_owned()
                             }),
                         ).class("param-label")
-                            .space(Stretch(1.0));
+                            .space(Stretch(1.5));
 
                         Knob::custom(
                             cx,
@@ -59,18 +59,17 @@ impl ParamKnob {
                                 ArcTrack::new(
                                     cx,
                                     centered,
-                                    Percentage(95.0),
+                                    Percentage(500.0),
                                     Percentage(20.),
                                     -150.,
                                     150.,
                                     KnobMode::Continuous,
                                 )
                                     .value(lens)
-                                    .class("track")
+                                    .class("knob_arc")
                             },
                         )
                             .space(Stretch(1.0))
-                            .bottom(Stretch(0.))
                             .on_mouse_down(move |cx, _button| {
                                 cx.emit(ParamEvent::BeginSetParam);
                             })
@@ -85,11 +84,10 @@ impl ParamKnob {
                             cx,
                             params.map(move |params| params_to_param(params).name().to_owned()),
                         )
-                            .space(Stretch(1.0))
+                            .space(Stretch(0.8))
                             .top(Stretch(0.))
                             .class("param-label");
-                    })
-                        .class("param_knob");
+                    }).class("knob_container");
                 }),
             )
     }

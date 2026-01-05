@@ -97,10 +97,10 @@ impl Plugin for TapeDelay {
     fn initialize(
         &mut self,
         _layout: &AudioIOLayout,
-        buffer_config: &BufferConfig,
+        _buffer_config: &BufferConfig,
         _ctx: &mut impl InitContext<Self>,
     ) -> bool {
-        self.sample_rate = buffer_config.sample_rate;
+        self.sample_rate = _buffer_config.sample_rate;
         let max_samples = (self.sample_rate * 2.0) as usize;
         self.delay_buffer_l = vec![0.0; max_samples];
         self.delay_buffer_r = vec![0.0; max_samples];
@@ -116,38 +116,62 @@ impl Plugin for TapeDelay {
         _aux: &mut AuxiliaryBuffers,
         _ctx: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        let target_delay_samples = self.params.delay_time_ms.value() / 1000.0 * self.sample_rate;
+        let sample_rate = self.sample_rate;
+        let target_delay_samples = (self.params.delay_time_ms.value() / 1000.0) * sample_rate;
+
+        // Smooth coefficients should ideally be pre-calculated or sample-rate dependent
         let smooth_coeff = 0.0005;
         let smooth_anti_coeff = 1.0 - smooth_coeff;
+
         let buffer_len = self.delay_buffer_l.len();
 
-        for (_, block_frame) in buffer.iter_samples().enumerate() {
+        // 1. Safety Guard: Prevent division by zero or processing on empty buffers
+        if buffer_len == 0 {
+            return ProcessStatus::Normal;
+        }
+
+        for channel_samples in buffer.iter_samples() {
+            // 2. Smooth parameters once per sample
             self.current_delay_samples = (smooth_anti_coeff * self.current_delay_samples)
                 + (smooth_coeff * target_delay_samples);
+
             let feedback = self.params.feedback.smoothed.next();
             let mix = self.params.mix.smoothed.next();
 
-            let mut read_pos = self.write_pos as f32 - self.current_delay_samples;
-            while read_pos < 0.0 {
-                read_pos += buffer_len as f32;
+            // 3. Deterministic read position calculation
+            // rem_euclid handles negative wrap-around in one step
+            let read_pos = (self.write_pos as f32 - self.current_delay_samples).rem_euclid(buffer_len as f32);
+
+            // 4. Safe Channel Iteration (No Unwraps)
+            let mut samples = channel_samples.into_iter();
+
+            // Channel Left
+            if let Some(sample_l) = samples.next() {
+                let input_l = *sample_l;
+                let delayed_l = linear_interpolate(&self.delay_buffer_l, read_pos);
+
+                // Safe indexing
+                if let Some(buf_val) = self.delay_buffer_l.get_mut(self.write_pos) {
+                    *buf_val = input_l + (delayed_l * feedback);
+                }
+                *sample_l = (input_l * (1.0 - mix)) + (delayed_l * mix);
             }
 
-            let mut channels = block_frame.into_iter();
-            let sample_l = channels.next().unwrap();
-            let sample_r = channels.next().unwrap();
-            let input_l = *sample_l;
-            let input_r = *sample_r;
+            // Channel Right
+            if let Some(sample_r) = samples.next() {
+                let input_r = *sample_r;
+                let delayed_r = linear_interpolate(&self.delay_buffer_r, read_pos);
 
-            let delayed_l = linear_interpolate(&self.delay_buffer_l, read_pos);
-            self.delay_buffer_l[self.write_pos] = input_l + (delayed_l * feedback);
-            *sample_l = (input_l * (1.0 - mix)) + (delayed_l * mix);
+                if let Some(buf_val) = self.delay_buffer_r.get_mut(self.write_pos) {
+                    *buf_val = input_r + (delayed_r * feedback);
+                }
+                *sample_r = (input_r * (1.0 - mix)) + (delayed_r * mix);
+            }
 
-            let delayed_r = linear_interpolate(&self.delay_buffer_r, read_pos);
-            self.delay_buffer_r[self.write_pos] = input_r + (delayed_r * feedback);
-            *sample_r = (input_r * (1.0 - mix)) + (delayed_r * mix);
-
+            // 5. Safe Write Position Increment
             self.write_pos = (self.write_pos + 1) % buffer_len;
         }
+
         ProcessStatus::Normal
     }
 

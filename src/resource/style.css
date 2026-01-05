@@ -1,74 +1,40 @@
-/* Main Background */
 .main-gui {
     background-color: #1e1e1e;
-    /* Use percentage padding to keep margins relative */
-    padding: 5%;
-    child-space: 2%;
+    child-space: 5%;
 }
 
-label.count {
-    alignment: center;
-    border-width: 1px;
-    border-color: #808080;
-    color: #732b5a;
-    font-size: 80px;
-    size: 80px;
-    font-weight: bold;
-    text-align: center;
-    border-radius: 4px;
+.knob-section {
+    background-color: #280c55;
+    child-space: 5%;
+}
+
+.title-section {
+    background-color: #512540;
     width: 1s;
-    font-size: larger;
+    height: 20%;
 }
 
-/* Horizontal alignment for the knobs */
-.hstack {
-    width: 100%;
-    height: 60%; /* Main knob area takes 60% of vertical space */
-    child-space: 1stretch;
+.header-title {
+    background-color: #512540;
+
+    color: #d28819;
+    font-size: 50;
+    font-weight: bold;
 }
 
-/* --- Scaling Knob Styling --- */
-
-/*paramknob {*/
-/*    !* Width is 25% of the parent HStack width *!*/
-/*    width: 25%;*/
-/*    height: 100%;*/
-/*}*/
-
-/* The circular part of the knob */
-.param_knob {
-    /* Using percentage ensures it scales with the paramknob container */
+.knob_container {
     width: 80%;
-    aspect-ratio: 1.0; /* Keeps it a perfect circle */
-    background-color: #151515;
-    border-radius: 50%; /* Fully circular regardless of size */
+    background-color: #cfb969;
+    border-radius: 30%;
     border-width: 2px;
     border-color: #444444;
 }
 
-/* The indicator tick */
-.tick {
-    background-color: #3b732b;
-    /* Relative thickness and height */
-    width: 40%;
-    height: 50%;
-    border-radius: 1px;
+.knob_arc {
+    background-color: #9a56bd;
 }
 
-/* The indicator track */
-.track {
-    background-color: #ffc32d;
-    /* Relative thickness and height */
-    width: 50%;
-    height: 50%;
-    border-radius: 1px;
-}
-
-/* Knob Labels */
 .param-label {
-    color: #bdae93;
-    /* Relative font size often works best using 'units' or a fixed size
-       that fits the relative container height */
-    font-size: 8%;
-    padding-top: 5%;
+    color: #000000;
+    font-size: 30;
 }

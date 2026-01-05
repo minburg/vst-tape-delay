@@ -7,6 +7,8 @@ license = "ISC"
 
 [lib]
 crate-type = ["cdylib", "lib"]
+name = "convolution_vst_lib"
+
 
 [dependencies]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["standalone", "vst3"] }
