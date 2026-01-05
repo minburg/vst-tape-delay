@@ -1,8 +1,12 @@
 use nih_plug::prelude::*;
+use nih_plug_vizia::widgets::ParamEvent;
 use nih_plug_vizia::ViziaState;
-use nih_plug_vizia::{assets, create_vizia_editor, widgets::*, ViziaTheming};
+use nih_plug_vizia::{assets, create_vizia_editor, ViziaTheming};
+use std::ops::Deref;
 // Import Vizia core items (Lens, Model, Context, etc.)
 use nih_plug_vizia::vizia::prelude::*;
+use nih_plug_vizia::widgets::param_base::ParamWidgetBase;
+use std::borrow::Borrow;
 use std::sync::Arc;
 
 pub struct TapeDelay {
@@ -74,7 +78,7 @@ impl Default for TapeDelay {
     fn default() -> Self {
         Self {
             params: Arc::new(TapeParams::default()),
-            editor_state: ViziaState::new(|| (400, 300)),
+            editor_state: ViziaState::new(|| (700, 350)),
             delay_buffer_l: Vec::new(),
             delay_buffer_r: Vec::new(),
             write_pos: 0,
@@ -86,7 +90,7 @@ impl Default for TapeDelay {
 
 impl Plugin for TapeDelay {
     const NAME: &'static str = "Tape Delay";
-    const VENDOR: &'static str = "My Name";
+    const VENDOR: &'static str = "Convolution DEV";
     const URL: &'static str = "https://youtu.be/dQw4w9WgXcQ";
     const EMAIL: &'static str = "email@example.com";
     const VERSION: &'static str = "0.0.1";
@@ -200,50 +204,92 @@ fn linear_interpolate(buffer: &[f32], read_pos: f32) -> f32 {
     buffer[index_a] * (1.0 - fraction) + buffer[index_b] * fraction
 }
 
-// --- GUI Implementation (Vizia) ---
-
 fn build_gui(cx: &mut Context) {
+    let bg_color = Color::rgb(30, 30, 30);
+    let accent_red = Color::rgb(168, 27, 27);
+
     VStack::new(cx, |cx| {
-        Label::new(cx, "TAPE DELAY")
-            .font_weight(FontWeightKeyword::Bold)
-            .font_size(30.0)
-            .bottom(Pixels(20.0));
-
-        HStack::new(cx, |cx| {
-            // --- Slider 1: Time ---
-            VStack::new(cx, |cx| {
-                Label::new(cx, "Time").bottom(Pixels(5.0));
-
-                ParamSlider::new(cx, Data::params, |p| &p.delay_time_ms);
-            })
-            .row_between(Pixels(10.0))
-            .child_space(Stretch(1.0));
-
-            // --- Slider 2: Feedback ---
-            VStack::new(cx, |cx| {
-                Label::new(cx, "Feedback").bottom(Pixels(5.0));
-
-                ParamSlider::new(cx, Data::params, |p| &p.feedback);
-            })
-            .row_between(Pixels(10.0))
-            .child_space(Stretch(1.0));
-
-            // --- Slider 3: Mix ---
-            VStack::new(cx, |cx| {
-                Label::new(cx, "Dry/Wet").bottom(Pixels(5.0));
-
-                ParamSlider::new(cx, Data::params, |p| &p.mix);
-            })
-            .row_between(Pixels(10.0))
-            .child_space(Stretch(1.0));
+        // --- Header ---
+        VStack::new(cx, |cx| {
+            Label::new(cx, "TAPE DELAY")
+                .font_size(40.0)
+                .font_weight(FontWeightKeyword::Bold)
+                .color(accent_red);
         })
-        .col_between(Pixels(20.0));
+        .height(Pixels(80.0))
+        .child_space(Stretch(1.0));
+
+        // --- Knobs ---
+        HStack::new(cx, |cx| {
+            create_analog_knob(
+                cx,
+                "TIME",
+                0.5,
+                ParamWidgetBase::normalized_value_lens(
+                    Data::params.map(|p| &p.delay_time_ms),
+                ),
+                Data::params.map(|p| &p.delay_time_ms),
+            );
+
+            create_analog_knob(
+                cx,
+                "FEEDBACK",
+                0.4,
+                ParamWidgetBase::normalized_value_lens(
+                    Data::params.map(|p| &p.feedback),
+                ),
+                Data::params.map(|p| &p.feedback),
+            );
+
+            create_analog_knob(
+                cx,
+                "DRY / WET",
+                0.5,
+                ParamWidgetBase::normalized_value_lens(
+                    Data::params.map(|p| &p.mix),
+                ),
+                Data::params.map(|p| &p.mix),
+            );
+        })
+        .height(Stretch(1.0))
+        .col_between(Pixels(40.0))
+        .child_space(Stretch(1.0));
     })
-    .child_space(Stretch(1.0));
+    .width(Pixels(700.0))
+    .height(Pixels(350.0))
+    .background_color(bg_color);
 }
 
-fn main() {
-    nih_export_standalone::<TapeDelay>();
+fn create_analog_knob<L, PL, P>(
+    cx: &mut Context,
+    label: &str,
+    default: f32,
+    value_lens: L,
+    param_lens: PL,
+)
+where
+    L: Lens<Target = f32>,
+    PL: Lens<Target = &P> + Send + Sync + 'static,
+    P: Param + Sized,
+{
+    VStack::new(cx, |cx| {
+        Knob::new(cx, default, value_lens, false)
+            .width(Pixels(80.0))
+            .height(Pixels(80.0))
+            .on_changing(move |cx, val| {
+                let param: &P = param_lens.get(cx);
+                cx.emit(ParamEvent::SetParameterNormalized(param, val));
+            });
+
+        Label::new(cx, label)
+            .color(Color::rgb(180, 180, 180));
+    })
+        .child_space(Stretch(1.0));
 }
+
+
+
+
+
 
 nih_export_vst3!(TapeDelay);
