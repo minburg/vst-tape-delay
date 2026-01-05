@@ -1,14 +1,9 @@
 use std::sync::Arc;
 
-use nih_plug::prelude::{util, Editor, Vst3Plugin};
-use nih_plug_vizia::vizia::image::Pixel;
+use nih_plug::prelude::Editor;
 use nih_plug_vizia::vizia::prelude::*;
-use nih_plug_vizia::vizia::resource::ImageRetentionPolicy;
 use nih_plug_vizia::widgets::*;
-use nih_plug_vizia::{assets, create_vizia_editor, ViziaState, ViziaTheming};
-
-use std::fs::File;
-use std::io::prelude::*;
+use nih_plug_vizia::{create_vizia_editor, ViziaState, ViziaTheming};
 
 use crate::ChorusParams;
 
@@ -89,19 +84,9 @@ pub(crate) fn create(
                     .class("header-label");
                 VStack::new(cx, |cx| {
                     HStack::new(cx, |cx| {
-                        ParamKnob::new(cx, Data::chorus_data, |params| &params.delay_ms, false);
-                        ParamKnob::new(cx, Data::chorus_data, |params| &params.depth, false);
-                        ParamKnob::new(cx, Data::chorus_data, |params| &params.rate, false);
-                    }).col_between(Pixels(15.0));
-                    HStack::new(cx, |cx| {
+                        ParamKnob::new(cx, Data::chorus_data, |params| &params.time, false);
                         ParamKnob::new(cx, Data::chorus_data, |params| &params.feedback, false);
                         ParamKnob::new(cx, Data::chorus_data, |params| &params.mix, false);
-                        ParamButton::new(cx, Data::chorus_data, |params| &params.mono)
-                            .height(Pixels(30.0))
-                            .space(Stretch(1.0))
-                            .left(Pixels(30.0))
-                            .bottom(Percentage(51.0));
-
                     }).col_between(Pixels(15.0));
 
                 }).col_between(Pixels(30.0));
