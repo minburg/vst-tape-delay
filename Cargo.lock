@@ -2040,6 +2040,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "maeror_chorus"
+version = "0.1.0"
+dependencies = [
+ "nih_plug",
+ "nih_plug_vizia",
+ "parking_lot",
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "malloc_buf"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3381,15 +3391,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "tape_delay"
-version = "0.1.0"
-dependencies = [
- "nih_plug",
- "nih_plug_vizia",
- "parking_lot",
 ]
 
 [[package]]

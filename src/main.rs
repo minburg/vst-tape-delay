@@ -1,7 +1,7 @@
-use nih_plug::prelude::*;
 
-use tape_delay::TapeDelay;
+use nih_plug::prelude::*;
+use maeror_chorus::ChorusPlugin;
 
 fn main() {
-    nih_export_standalone::<TapeDelay>();
+    nih_export_standalone::<ChorusPlugin>();
 }

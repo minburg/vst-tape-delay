@@ -1,5 +1,5 @@
 [package]
-name = "tape_delay"
+name = "maeror_chorus"
 version = "0.1.0"
 edition = "2021"
 authors = ["Marinus Burger <marinus.burger@gmail.com>"]
@@ -12,6 +12,7 @@ crate-type = ["cdylib", "lib"]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["standalone", "vst3"] }
 nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 parking_lot = "0.12.5"
+rand = "0.8.5"
 
 [workspace]
 members = [
