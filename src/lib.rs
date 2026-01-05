@@ -13,6 +13,21 @@ pub struct TapeDelay {
     write_pos: usize,
     sample_rate: f32,
     current_delay_samples: f32,
+
+    // --- NEW FIELDS FOR TAPE MOJO --- //
+
+    // 1. LFO Phase (0.0 to 2*PI)
+    // Needs to persist so the wobble is smooth across buffers
+    lfo_phase: f32,
+
+    // 2. Filter States
+    // These hold the "previous sample" value for the Low Pass filters
+    lp_state_l: f32,
+    lp_state_r: f32,
+
+    // 3. Random Seed
+    // Needs to persist so the noise doesn't repeat identical patterns every buffer
+    rng_seed: u32,
 }
 
 #[derive(Params)]
@@ -20,6 +35,8 @@ struct TapeParams {
     #[persist = "editor-state"]
     editor_state: Arc<ViziaState>,
 
+    #[id = "gain"]
+    pub gain: FloatParam,
     #[id = "time"]
     pub delay_time_ms: FloatParam,
     #[id = "feedback"]
@@ -33,6 +50,10 @@ impl Default for TapeParams {
     fn default() -> Self {
         Self {
             editor_state: editor::default_state(),
+
+            gain: FloatParam::new("Gayn", 1.2, FloatRange::Linear { min: 0.5, max: 10.0 })
+                .with_smoother(SmoothingStyle::Linear(15.0))
+                .with_value_to_string(formatters::v2s_f32_rounded(1)),
 
             delay_time_ms: FloatParam::new("Tame", 200.0, FloatRange::Linear { min: 1.0, max: 1000.0 })
                 .with_smoother(SmoothingStyle::Linear(15.0))
@@ -63,6 +84,15 @@ impl Default for TapeDelay {
             write_pos: 0,
             sample_rate: 44100.0,
             current_delay_samples: 0.0,
+            // Start LFO at 0
+            lfo_phase: 0.0,
+
+            // Filters start "empty" (0.0 energy)
+            lp_state_l: 0.0,
+            lp_state_r: 0.0,
+
+            // Seed can be any non-zero integer
+            rng_seed: 12345,
         }
     }
 }
@@ -117,58 +147,104 @@ impl Plugin for TapeDelay {
         _ctx: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let sample_rate = self.sample_rate;
-        let target_delay_samples = (self.params.delay_time_ms.value() / 1000.0) * sample_rate;
-
-        // Smooth coefficients should ideally be pre-calculated or sample-rate dependent
-        let smooth_coeff = 0.0005;
-        let smooth_anti_coeff = 1.0 - smooth_coeff;
-
         let buffer_len = self.delay_buffer_l.len();
 
-        // 1. Safety Guard: Prevent division by zero or processing on empty buffers
-        if buffer_len == 0 {
-            return ProcessStatus::Normal;
-        }
+        // 1. Calculate Target Delay
+        let target_delay_samples = (self.params.delay_time_ms.value() / 1000.0) * sample_rate;
+
+        // TAPE MECHANICS: Setup constants for the "Machine"
+        // In a full plugin, these would be user parameters (e.g., "Age", "Grit")
+        let flutter_rate = 2.0 * std::f32::consts::PI * (1.5 / sample_rate); // 1.5 Hz wobble
+        let flutter_depth = 15.0; // The depth of the pitch wobble in samples
+        // let tape_drive = 1.2;     // Pushing the "tape" slightly into the red
+        let noise_amount = 0.01; // Background hiss level (was 0.002)
+        let tone_cutoff = 0.5;    // Low pass filter coefficient (simulates head degradation)
+
+        if buffer_len == 0 { return ProcessStatus::Normal; }
 
         for channel_samples in buffer.iter_samples() {
-            // 2. Smooth parameters once per sample
-            self.current_delay_samples = (smooth_anti_coeff * self.current_delay_samples)
-                + (smooth_coeff * target_delay_samples);
 
-            let feedback = self.params.feedback.smoothed.next();
-            let mix = self.params.mix.smoothed.next();
+            // --- MODULATION (Wow/Flutter) ---
+            // Increment LFO phase. "sin" creates the smooth motor wobble.
+            self.lfo_phase += flutter_rate;
+            if self.lfo_phase > 2.0 * std::f32::consts::PI {
+                self.lfo_phase -= 2.0 * std::f32::consts::PI;
+            }
+            let flutter_offset = self.lfo_phase.sin() * flutter_depth;
 
-            // 3. Deterministic read position calculation
-            // rem_euclid handles negative wrap-around in one step
-            let read_pos = (self.write_pos as f32 - self.current_delay_samples).rem_euclid(buffer_len as f32);
+            // Smooth delay time (Slew Limiting)
+            // This prevents zipper noise when you turn the time knob quickly.
+            let smooth_coeff = 0.0005;
+            self.current_delay_samples = (self.current_delay_samples * (1.0 - smooth_coeff))
+                + (target_delay_samples * smooth_coeff);
 
-            // 4. Safe Channel Iteration (No Unwraps)
+            // Add the flutter to the smoothed delay time
+            let mod_delay_samples = self.current_delay_samples + flutter_offset;
+
+            // Get Parameter Values
+            let feedback_amt = self.params.feedback.smoothed.next();
+            let mix_amt = self.params.mix.smoothed.next();
+
+            // --- READ HEAD CALCULATION ---
+            let read_pos = (self.write_pos as f32 - mod_delay_samples).rem_euclid(buffer_len as f32);
+
             let mut samples = channel_samples.into_iter();
 
-            // Channel Left
+            // --- LEFT CHANNEL PROCESSING ---
             if let Some(sample_l) = samples.next() {
                 let input_l = *sample_l;
-                let delayed_l = linear_interpolate(&self.delay_buffer_l, read_pos);
 
-                // Safe indexing
+                // 1. Read from "Tape"
+                let raw_delayed_l = linear_interpolate(&self.delay_buffer_l, read_pos);
+
+                // 2. Generate Dust/Noise
+                let noise = get_noise(&mut self.rng_seed) * noise_amount;
+
+                // 3. Feedback Processing Chain (The "Secret Sauce")
+                // We take the delayed signal and process it BEFORE putting it back in the buffer.
+
+                // A. Tone Loss (Filtering)
+                // Simulates the high-frequency loss of magnetic tape
+                let filtered_feedback = one_pole_lp(raw_delayed_l, &mut self.lp_state_l, tone_cutoff);
+
+                // B. Summing
+                // Add input + filtered feedback + a little noise
+                let mut signal_to_record = input_l + (filtered_feedback * feedback_amt) + noise;
+
+                // C. Tape Saturation (Soft Clipping)
+                // This is CRITICAL. It squashes the signal.
+                // If feedback > 100%, this keeps it from exceeding digital max (1.0).
+                signal_to_record = soft_clip(signal_to_record, self.params.feedback.smoothed.next());
+
+                // 4. Write to "Tape" (Buffer)
                 if let Some(buf_val) = self.delay_buffer_l.get_mut(self.write_pos) {
-                    *buf_val = input_l + (delayed_l * feedback);
+                    *buf_val = signal_to_record;
                 }
-                *sample_l = (input_l * (1.0 - mix)) + (delayed_l * mix);
+
+                // 5. Output Mix
+                // Usually on tape delays, the output is also saturated, or you blend the clean dry with saturated wet.
+                *sample_l = (input_l * (1.0 - mix_amt)) + (raw_delayed_l * mix_amt);
             }
 
-            // Channel Right
+            // --- RIGHT CHANNEL PROCESSING (Same logic) ---
             if let Some(sample_r) = samples.next() {
                 let input_r = *sample_r;
-                let delayed_r = linear_interpolate(&self.delay_buffer_r, read_pos);
+                let raw_delayed_r = linear_interpolate(&self.delay_buffer_r, read_pos);
+                let noise = get_noise(&mut self.rng_seed) * noise_amount;
+
+                let filtered_feedback = one_pole_lp(raw_delayed_r, &mut self.lp_state_r, tone_cutoff);
+                let mut signal_to_record = input_r + (filtered_feedback * feedback_amt) + noise;
+
+                signal_to_record = soft_clip(signal_to_record, self.params.feedback.smoothed.next());
 
                 if let Some(buf_val) = self.delay_buffer_r.get_mut(self.write_pos) {
-                    *buf_val = input_r + (delayed_r * feedback);
+                    *buf_val = signal_to_record;
                 }
-                *sample_r = (input_r * (1.0 - mix)) + (delayed_r * mix);
+
+                *sample_r = (input_r * (1.0 - mix_amt)) + (raw_delayed_r * mix_amt);
             }
 
-            // 5. Safe Write Position Increment
+            // Increment Write Head
             self.write_pos = (self.write_pos + 1) % buffer_len;
         }
 
@@ -181,6 +257,27 @@ impl Plugin for TapeDelay {
             self.params.editor_state.clone(),
         )
     }
+}
+
+// Helper: A simple 1-pole lowpass filter (The "Tone Knob")
+// value: current sample, state: previous sample, cutoff: 0.0 to 1.0
+fn one_pole_lp(input: f32, state: &mut f32, cutoff: f32) -> f32 {
+    *state += cutoff * (input - *state);
+    *state
+}
+
+// Helper: A simple soft clipper using tanh (The "Tape Saturation")
+// This keeps your feedback from exploding.
+fn soft_clip(sample: f32, drive: f32) -> f32 {
+    // 'drive' allows us to push into the saturation harder
+    (sample * drive).tanh()
+}
+
+// Helper: Simple pseudo-random noise generator (for Dust/Hiss)
+fn get_noise(seed: &mut u32) -> f32 {
+    // A quick Linear Congruential Generator (LCG) for speed
+    *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+    (*seed as f32 / u32::MAX as f32) * 2.0 - 1.0 // Returns -1.0 to 1.0
 }
 
 impl Vst3Plugin for TapeDelay {

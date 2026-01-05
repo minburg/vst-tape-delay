@@ -68,6 +68,10 @@ pub(crate) fn create(
                 HStack::new(cx, |cx| {
 
                     VStack::new(cx, |cx| {
+                        ParamKnob::new(cx, Data::tape_data, |params| &params.gain, false)
+                            .width(Stretch(1.0));
+                    }).class("portion");
+                    VStack::new(cx, |cx| {
                         ParamKnob::new(cx, Data::tape_data, |params| &params.delay_time_ms, false)
                             .width(Stretch(1.0));
                     }).class("portion");
