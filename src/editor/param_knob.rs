@@ -56,16 +56,6 @@ impl ParamKnob {
                                 params_to_param(params).unmodulated_normalized_value()
                             }),
                             move |cx, lens| {
-                                TickKnob::new(
-                                    cx,
-                                    Percentage(50.0),
-                                    Pixels(4.),
-                                    Percentage(55.0),
-                                    300.0,
-                                    KnobMode::Continuous
-                                )
-                                    .value(lens.clone())
-                                    .class("tick");
                                 ArcTrack::new(
                                     cx,
                                     centered,
@@ -96,7 +86,8 @@ impl ParamKnob {
                             params.map(move |params| params_to_param(params).name().to_owned()),
                         )
                             .space(Stretch(1.0))
-                            .top(Stretch(0.));
+                            .top(Stretch(0.))
+                            .class("param-label");
                     })
                         .class("param_knob");
                 }),

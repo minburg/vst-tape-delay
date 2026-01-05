@@ -1,0 +1,74 @@
+/* Main Background */
+.main-gui {
+    background-color: #1e1e1e;
+    /* Use percentage padding to keep margins relative */
+    padding: 5%;
+    child-space: 2%;
+}
+
+label.count {
+    alignment: center;
+    border-width: 1px;
+    border-color: #808080;
+    color: #732b5a;
+    font-size: 80px;
+    size: 80px;
+    font-weight: bold;
+    text-align: center;
+    border-radius: 4px;
+    width: 1s;
+    font-size: larger;
+}
+
+/* Horizontal alignment for the knobs */
+.hstack {
+    width: 100%;
+    height: 60%; /* Main knob area takes 60% of vertical space */
+    child-space: 1stretch;
+}
+
+/* --- Scaling Knob Styling --- */
+
+/*paramknob {*/
+/*    !* Width is 25% of the parent HStack width *!*/
+/*    width: 25%;*/
+/*    height: 100%;*/
+/*}*/
+
+/* The circular part of the knob */
+.param_knob {
+    /* Using percentage ensures it scales with the paramknob container */
+    width: 80%;
+    aspect-ratio: 1.0; /* Keeps it a perfect circle */
+    background-color: #151515;
+    border-radius: 50%; /* Fully circular regardless of size */
+    border-width: 2px;
+    border-color: #444444;
+}
+
+/* The indicator tick */
+.tick {
+    background-color: #3b732b;
+    /* Relative thickness and height */
+    width: 40%;
+    height: 50%;
+    border-radius: 1px;
+}
+
+/* The indicator track */
+.track {
+    background-color: #ffc32d;
+    /* Relative thickness and height */
+    width: 50%;
+    height: 50%;
+    border-radius: 1px;
+}
+
+/* Knob Labels */
+.param-label {
+    color: #bdae93;
+    /* Relative font size often works best using 'units' or a fixed size
+       that fits the relative container height */
+    font-size: 8%;
+    padding-top: 5%;
+}
