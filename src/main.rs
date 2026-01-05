@@ -1,7 +1,7 @@
 
 use nih_plug::prelude::*;
-use maeror_chorus::ChorusPlugin;
+use convolution_vst::TapeDelay;
 
 fn main() {
-    nih_export_standalone::<ChorusPlugin>();
+    nih_export_standalone::<TapeDelay>();
 }

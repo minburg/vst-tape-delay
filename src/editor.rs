@@ -5,7 +5,7 @@ use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::widgets::*;
 use nih_plug_vizia::{create_vizia_editor, ViziaState, ViziaTheming};
 
-use crate::ChorusParams;
+use crate::TapeParams;
 
 use self::param_knob::ParamKnob;
 
@@ -52,7 +52,7 @@ knob .track {
 
 #[derive(Lens)]
 struct Data {
-    chorus_data: Arc<ChorusParams>
+    tape_data: Arc<TapeParams>
 }
 
 impl Model for Data {}
@@ -62,7 +62,7 @@ pub(crate) fn default_state() -> Arc<ViziaState> {
 }
 
 pub(crate) fn create(
-    chorus_data: Arc<ChorusParams>,
+    tape_data: Arc<TapeParams>,
     editor_state: Arc<ViziaState>,
 ) -> Option<Box<dyn Editor>> {
     create_vizia_editor(editor_state,
@@ -71,12 +71,12 @@ pub(crate) fn create(
             // cx.add_theme(STYLE);
 
             Data {
-                chorus_data: chorus_data.clone(),
+                tape_data: tape_data.clone(),
             }.build(cx);
 
             ResizeHandle::new(cx);
             VStack::new(cx, |cx| {
-                Label::new(cx, "MAEROR'S CHORUS")
+                Label::new(cx, "Convolution's TAPE DELAY")
                     .font_size(24.0)
                     .height(Pixels(75.0))
                     .child_top(Stretch(1.0))
@@ -84,9 +84,9 @@ pub(crate) fn create(
                     .class("header-label");
                 VStack::new(cx, |cx| {
                     HStack::new(cx, |cx| {
-                        ParamKnob::new(cx, Data::chorus_data, |params| &params.time, false);
-                        ParamKnob::new(cx, Data::chorus_data, |params| &params.feedback, false);
-                        ParamKnob::new(cx, Data::chorus_data, |params| &params.mix, false);
+                        ParamKnob::new(cx, Data::tape_data, |params| &params.delay_time_ms, false);
+                        ParamKnob::new(cx, Data::tape_data, |params| &params.feedback, false);
+                        ParamKnob::new(cx, Data::tape_data, |params| &params.mix, false);
                     }).col_between(Pixels(15.0));
 
                 }).col_between(Pixels(30.0));
