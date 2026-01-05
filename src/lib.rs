@@ -34,20 +34,20 @@ impl Default for TapeParams {
         Self {
             editor_state: editor::default_state(),
 
-            delay_time_ms: FloatParam::new("Time", 15.0, FloatRange::Linear { min: 0.1, max: 50.0 })
+            delay_time_ms: FloatParam::new("Tame", 200.0, FloatRange::Linear { min: 1.0, max: 1000.0 })
                 .with_smoother(SmoothingStyle::Linear(15.0))
-                .with_unit("ms")
-                .with_value_to_string(formatters::v2s_f32_rounded(2)),
+                .with_unit(" ms")
+                .with_value_to_string(formatters::v2s_f32_rounded(1)),
 
-            feedback: FloatParam::new("Feedback", 0.0, FloatRange::Linear { min: 0.0, max: 0.999 })
+            feedback: FloatParam::new("Feedbick", 0.3, FloatRange::Linear { min: 0.0, max: 0.999 })
                 .with_smoother(SmoothingStyle::Linear(15.0))
-                .with_unit("%")
+                .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(1))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
 
-            mix: FloatParam::new("Mix", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
+            mix: FloatParam::new("Mics", 0.3, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_smoother(SmoothingStyle::Linear(15.0))
-                .with_unit("%")
+                .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(1))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
         }
@@ -191,10 +191,25 @@ impl Vst3Plugin for TapeDelay {
 
 #[inline]
 fn linear_interpolate(buffer: &[f32], read_pos: f32) -> f32 {
-    let index_a = read_pos as usize;
-    let index_b = (index_a + 1) % buffer.len();
-    let fraction = read_pos - index_a as f32;
-    buffer[index_a] * (1.0 - fraction) + buffer[index_b] * fraction
+    let len = buffer.len();
+    if len == 0 { return 0.0; }
+    if len == 1 { return buffer[0]; }
+
+    // Use floor to get the integer part safely
+    let read_pos_floor = read_pos.floor();
+    let fraction = read_pos - read_pos_floor;
+
+    // Ensure index_a is within [0, len-1]
+    let index_a = (read_pos_floor as usize) % len;
+    // Ensure index_b is index_a + 1 wrapped around
+    let index_b = (index_a + 1) % len;
+
+    // Use get() to provide a default 0.0 instead of panicking
+    // This is the "ultimate" safety net for DSP
+    let sample_a = buffer.get(index_a).unwrap_or(&0.0);
+    let sample_b = buffer.get(index_b).unwrap_or(&0.0);
+
+    sample_a * (1.0 - fraction) + sample_b * fraction
 }
 
 nih_export_vst3!(TapeDelay);

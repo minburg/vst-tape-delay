@@ -84,7 +84,7 @@ impl ParamKnob {
                             cx,
                             params.map(move |params| params_to_param(params).name().to_owned()),
                         )
-                            .space(Stretch(0.8))
+                            .space(Stretch(0.6))
                             .top(Stretch(0.))
                             .class("param-label");
                     }).class("knob_container");
