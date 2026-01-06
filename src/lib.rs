@@ -1,8 +1,13 @@
 use nih_plug::prelude::*;
 use nih_plug_vizia::ViziaState;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 mod editor;
+
+const TIME_MS_MIN: f32 = 1.0;
+const TIME_MS_MAX: f32 = 1000.0;
 
 pub struct TapeDelay {
     params: Arc<TapeParams>,
@@ -28,6 +33,11 @@ pub struct TapeDelay {
     // 3. Random Seed
     // Needs to persist so the noise doesn't repeat identical patterns every buffer
     rng_seed: u32,
+
+    /// The decay factor for a single sample
+    meter_decay_per_sample: f32,
+    peak_meter_l: Arc<AtomicF32>,
+    peak_meter_r: Arc<AtomicF32>,
 }
 
 #[derive(Params)]
@@ -39,34 +49,87 @@ struct TapeParams {
     pub gain: FloatParam,
     #[id = "time"]
     pub delay_time_ms: FloatParam,
+    // Shared flag: Formatter reads this, Sync param updates this.
+    // We skip serializing this because it's just a helper for the GUI text.
+    #[persist = "ignore"]
+    pub is_sync_active: Arc<AtomicBool>,
+    #[id = "time_sync"]
+    pub time_sync: BoolParam,
     #[id = "feedback"]
     pub feedback: FloatParam,
     #[id = "mix"]
     pub mix: FloatParam,
 }
 
-
 impl Default for TapeParams {
     fn default() -> Self {
+        // Create the shared memory flag
+        let is_sync_active = Arc::new(AtomicBool::new(false));
+
+        // Clone it for the closure
+        let flag_for_formatter = is_sync_active.clone();
+        let flag_for_callback = is_sync_active.clone();
+
         Self {
+            is_sync_active, // Store original in struct
             editor_state: editor::default_state(),
 
-            gain: FloatParam::new("Gayn", 1.2, FloatRange::Linear { min: 0.5, max: 10.0 })
-                .with_smoother(SmoothingStyle::Linear(15.0))
-                .with_value_to_string(formatters::v2s_f32_rounded(1)),
+            gain: FloatParam::new(
+                "Gaen",
+                1.2,
+                FloatRange::Linear {
+                    min: 0.5,
+                    max: 10.0,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(15.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
 
-            delay_time_ms: FloatParam::new("Tame", 200.0, FloatRange::Linear { min: 1.0, max: 1000.0 })
-                .with_smoother(SmoothingStyle::Linear(15.0))
-                .with_unit(" ms")
-                .with_value_to_string(formatters::v2s_f32_rounded(1)),
+            delay_time_ms: FloatParam::new(
+                "Tame",
+                200.0,
+                FloatRange::Linear {
+                    min: TIME_MS_MIN,
+                    max: TIME_MS_MAX,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(15.0))
+            .with_value_to_string(Arc::new(move |value| {
+                // Check the flag
+                if flag_for_formatter.load(Ordering::Relaxed) {
+                    // --- SYNC MODE DISPLAY ---
+                    // Map 1.0-1000.0 back to 0-15 index
+                    let normalized = (value - 1.0) / (1000.0 - 1.0);
+                    let step_index = (normalized * 15.99).floor() as i32;
 
-            feedback: FloatParam::new("Feedbick", 0.3, FloatRange::Linear { min: 0.0, max: 0.999 })
-                .with_smoother(SmoothingStyle::Linear(15.0))
-                .with_unit(" %")
-                .with_value_to_string(formatters::v2s_f32_percentage(1))
-                .with_string_to_value(formatters::s2v_f32_percentage()),
+                    // Get the label (e.g., "1/8 .")
+                    let (_, label) = get_beat_info(step_index);
+                    label.to_string()
+                } else {
+                    // --- FREE MODE DISPLAY ---
+                    format!("{:.1} ms", value)
+                }
+            })),
 
-            mix: FloatParam::new("Mics", 0.3, FloatRange::Linear { min: 0.0, max: 1.0 })
+            time_sync: BoolParam::new("Time Sync", false).with_callback(Arc::new(move |value| {
+                // When user clicks button, update the flag!
+                flag_for_callback.store(value, Ordering::Relaxed);
+            })),
+
+            feedback: FloatParam::new(
+                "Feed-bick",
+                0.3,
+                FloatRange::Linear {
+                    min: 0.0,
+                    max: 0.999,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(15.0))
+            .with_unit(" %")
+            .with_value_to_string(formatters::v2s_f32_percentage(1))
+            .with_string_to_value(formatters::s2v_f32_percentage()),
+
+            mix: FloatParam::new("Mic's", 0.3, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_smoother(SmoothingStyle::Linear(15.0))
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(1))
@@ -93,6 +156,9 @@ impl Default for TapeDelay {
 
             // Seed can be any non-zero integer
             rng_seed: 12345,
+            meter_decay_per_sample: 1.0,
+            peak_meter_l: Arc::new(AtomicF32::new(0.0)), // 0.0 Linear = Silence
+            peak_meter_r: Arc::new(AtomicF32::new(0.0)),
         }
     }
 }
@@ -104,13 +170,11 @@ impl Plugin for TapeDelay {
     const EMAIL: &'static str = "email@example.com";
     const VERSION: &'static str = "0.0.1";
 
-    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
-        AudioIOLayout {
-            main_input_channels: NonZeroU32::new(2),
-            main_output_channels: NonZeroU32::new(2),
-            ..AudioIOLayout::const_default()
-        },
-    ];
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
+        main_input_channels: NonZeroU32::new(2),
+        main_output_channels: NonZeroU32::new(2),
+        ..AudioIOLayout::const_default()
+    }];
 
     const MIDI_INPUT: MidiConfig = MidiConfig::None;
     const MIDI_OUTPUT: MidiConfig = MidiConfig::None;
@@ -134,11 +198,20 @@ impl Plugin for TapeDelay {
         let max_samples = (self.sample_rate * 2.0) as usize;
         self.delay_buffer_l = vec![0.0; max_samples];
         self.delay_buffer_r = vec![0.0; max_samples];
+
+        let release_db_per_second = 20.0;
+
+        // Calculate the constant for 1 sample of decay
+        // We store this in the struct
+        self.meter_decay_per_sample = f32::powf(
+            10.0,
+            -release_db_per_second / (20.0 * _buffer_config.sample_rate)
+        );
+
         true
     }
 
-    fn reset(&mut self) {
-    }
+    fn reset(&mut self) {}
 
     fn process(
         &mut self,
@@ -149,21 +222,65 @@ impl Plugin for TapeDelay {
         let sample_rate = self.sample_rate;
         let buffer_len = self.delay_buffer_l.len();
 
-        // 1. Calculate Target Delay
-        let target_delay_samples = (self.params.delay_time_ms.value() / 1000.0) * sample_rate;
+        // 1. DETERMINE TARGET DELAY (Dual Mode Logic)
+        let raw_target_samples = if self.params.time_sync.value() {
+            // --- SYNC MODE (Stepped) ---
+
+            // A. Get BPM (Default to 120.0)
+            let bpm = _ctx.transport().tempo.unwrap_or(120.0) as f32;
+            let seconds_per_beat = 60.0 / bpm;
+
+            // B. Map the Knob to 16 Steps
+            // We need the "normalized" value of the knob (0.0 to 1.0).
+            // If your framework provides .normalized_value(), use that.
+            // If not, we calculate it manually assuming range is 1.0 to 1000.0 ms.
+            let current_ms = self.params.delay_time_ms.value();
+
+            // Normalize: (Val - Min) / (Max - Min) -> Result is 0.0 to 1.0
+            let normalized = (current_ms - TIME_MS_MIN) / (TIME_MS_MAX - TIME_MS_MIN);
+
+            // Map 0.0-1.0 to 0-15 (16 steps)
+            // We use .floor() to create stable "zones" for each step.
+            let total_steps = 16.0;
+            let step_index = (normalized * (total_steps - 0.01)).floor() as i32;
+
+            // C. Get Multiplier
+            let multiplier = get_beat_info(step_index).0; // Uses the helper function from before
+
+            // D. Calculate Samples
+            (seconds_per_beat * multiplier) * sample_rate
+        } else {
+            // --- FREE MODE (Continuous) ---
+            (self.params.delay_time_ms.value() / 1000.0) * sample_rate
+        };
+
+        // 2. SAFETY CLAMP (The "Safe Target")
+        // Ensure we never try to read past the end of the allocated buffer.
+        // We leave a 100-sample margin for the interpolation and jitter.
+        let max_safe_samples = buffer_len as f32 - 100.0;
+
+        // The .min() function returns the smaller of the two values.
+        // If raw_target is 350,000 but buffer is only 100,000, this snaps it to 99,900.
+        let target_delay_samples = raw_target_samples.min(max_safe_samples);
 
         // TAPE MECHANICS: Setup constants for the "Machine"
         // In a full plugin, these would be user parameters (e.g., "Age", "Grit")
         let flutter_rate = 2.0 * std::f32::consts::PI * (1.5 / sample_rate); // 1.5 Hz wobble
         let flutter_depth = 15.0; // The depth of the pitch wobble in samples
-        // let tape_drive = 1.2;     // Pushing the "tape" slightly into the red
-        let noise_amount = 0.01; // Background hiss level (was 0.002)
-        let tone_cutoff = 0.5;    // Low pass filter coefficient (simulates head degradation)
+        let noise_amount = 0.005; // Background hiss level (was 0.002)
+        let crackle_amount = 0.08; // Background hiss level (was 0.002)
+        let tone_cutoff = 0.5; // Low pass filter coefficient (simulates head degradation)
 
-        if buffer_len == 0 { return ProcessStatus::Normal; }
+        if buffer_len == 0 {
+            return ProcessStatus::Normal;
+        }
+
+        // --- METERING PREP ---
+        // We want to find the loudest peak in this entire buffer block
+        let mut max_amplitude_in_block_l: f32 = 0.0;
+        let mut max_amplitude_in_block_r: f32 = 0.0;
 
         for channel_samples in buffer.iter_samples() {
-
             // --- MODULATION (Wow/Flutter) ---
             // Increment LFO phase. "sin" creates the smooth motor wobble.
             self.lfo_phase += flutter_rate;
@@ -178,15 +295,24 @@ impl Plugin for TapeDelay {
             self.current_delay_samples = (self.current_delay_samples * (1.0 - smooth_coeff))
                 + (target_delay_samples * smooth_coeff);
 
-            // Add the flutter to the smoothed delay time
-            let mod_delay_samples = self.current_delay_samples + flutter_offset;
+            // FIX: Ensure delay never goes negative (Causality Check)
+            // If delay is 0ms, flutter might make it -15. We clamp to 0.0.
+            let mod_delay_samples = (self.current_delay_samples + flutter_offset).max(0.0);
 
             // Get Parameter Values
             let feedback_amt = self.params.feedback.smoothed.next();
+            // Allow feedback to go > 100%.
+            // If param is 1.0, internal feedback is 1.2.
+            // This ensures the loop gets louder than the input.
+            let feedback_gain = feedback_amt * 1.2;
             let mix_amt = self.params.mix.smoothed.next();
+            let gain_amt = self.params.gain.smoothed.next();
+
+            let makeup_gain = 1.0 / gain_amt.sqrt();
 
             // --- READ HEAD CALCULATION ---
-            let read_pos = (self.write_pos as f32 - mod_delay_samples).rem_euclid(buffer_len as f32);
+            let read_pos =
+                (self.write_pos as f32 - mod_delay_samples).rem_euclid(buffer_len as f32);
 
             let mut samples = channel_samples.into_iter();
 
@@ -199,31 +325,43 @@ impl Plugin for TapeDelay {
 
                 // 2. Generate Dust/Noise
                 let noise = get_noise(&mut self.rng_seed) * noise_amount;
+                let crackle = get_crackle(&mut self.rng_seed) * crackle_amount;
 
                 // 3. Feedback Processing Chain (The "Secret Sauce")
                 // We take the delayed signal and process it BEFORE putting it back in the buffer.
 
                 // A. Tone Loss (Filtering)
                 // Simulates the high-frequency loss of magnetic tape
-                let filtered_feedback = one_pole_lp(raw_delayed_l, &mut self.lp_state_l, tone_cutoff);
+                let filtered_feedback =
+                    one_pole_lp(raw_delayed_l, &mut self.lp_state_l, tone_cutoff);
 
                 // B. Summing
                 // Add input + filtered feedback + a little noise
-                let mut signal_to_record = input_l + (filtered_feedback * feedback_amt) + noise;
+                let mut signal_to_record =
+                    input_l + (filtered_feedback * feedback_gain) + noise + crackle;
 
                 // C. Tape Saturation (Soft Clipping)
                 // This is CRITICAL. It squashes the signal.
                 // If feedback > 100%, this keeps it from exceeding digital max (1.0).
-                signal_to_record = soft_clip(signal_to_record, self.params.feedback.smoothed.next());
+                signal_to_record = soft_clip(signal_to_record, gain_amt);
 
                 // 4. Write to "Tape" (Buffer)
                 if let Some(buf_val) = self.delay_buffer_l.get_mut(self.write_pos) {
                     *buf_val = signal_to_record;
                 }
 
+                // We apply makeup_gain ONLY to the wet signal here.
+                let wet_signal = raw_delayed_l * makeup_gain;
+
                 // 5. Output Mix
                 // Usually on tape delays, the output is also saturated, or you blend the clean dry with saturated wet.
-                *sample_l = (input_l * (1.0 - mix_amt)) + (raw_delayed_l * mix_amt);
+                *sample_l = (input_l * (1.0 - mix_amt)) + (wet_signal * mix_amt);
+
+                // Capture Peak for Metering (Simple absolute value check)
+                let abs_l = sample_l.abs();
+                if abs_l > max_amplitude_in_block_l {
+                    max_amplitude_in_block_l = abs_l;
+                }
             }
 
             // --- RIGHT CHANNEL PROCESSING (Same logic) ---
@@ -231,21 +369,71 @@ impl Plugin for TapeDelay {
                 let input_r = *sample_r;
                 let raw_delayed_r = linear_interpolate(&self.delay_buffer_r, read_pos);
                 let noise = get_noise(&mut self.rng_seed) * noise_amount;
+                let crackle = get_crackle(&mut self.rng_seed) * crackle_amount;
 
-                let filtered_feedback = one_pole_lp(raw_delayed_r, &mut self.lp_state_r, tone_cutoff);
-                let mut signal_to_record = input_r + (filtered_feedback * feedback_amt) + noise;
+                let filtered_feedback =
+                    one_pole_lp(raw_delayed_r, &mut self.lp_state_r, tone_cutoff);
+                let mut signal_to_record =
+                    input_r + (filtered_feedback * feedback_gain) + noise + crackle;
 
-                signal_to_record = soft_clip(signal_to_record, self.params.feedback.smoothed.next());
+                signal_to_record = soft_clip(signal_to_record, gain_amt);
 
                 if let Some(buf_val) = self.delay_buffer_r.get_mut(self.write_pos) {
                     *buf_val = signal_to_record;
                 }
 
-                *sample_r = (input_r * (1.0 - mix_amt)) + (raw_delayed_r * mix_amt);
+                let wet_signal = raw_delayed_r * makeup_gain;
+
+                *sample_r = (input_r * (1.0 - mix_amt)) + (wet_signal * mix_amt);
+
+                // Capture Peak for Metering (Simple absolute value check)
+                let abs_r = sample_r.abs();
+                if abs_r > max_amplitude_in_block_r {
+                    max_amplitude_in_block_r = abs_r;
+                }
             }
 
             // Increment Write Head
             self.write_pos = (self.write_pos + 1) % buffer_len;
+        }
+
+        // --- UPDATE METER (Once per buffer, efficient and thread-safe) ---
+        if self.params.editor_state.is_open() {
+            // Calculate the decay for THIS specific block size.
+            // This makes the decay speed identical whether the buffer is 32 or 1024.
+            let block_size = buffer.samples() as f32;
+            let block_decay = f32::powf(self.meter_decay_per_sample, block_size);
+
+            // LEFT Meter
+            let current_peak_l = self.peak_meter_l.load(std::sync::atomic::Ordering::Relaxed);
+            let mut new_peak_l = if max_amplitude_in_block_l > current_peak_l {
+                max_amplitude_in_block_l // Attack is instant
+            } else {
+                // Decay
+                current_peak_l * block_decay
+            };
+            // SAFETY: If the value is tiny, just kill it so the GUI goes to 0
+            if new_peak_l < 0.001 {
+                new_peak_l = 0.0;
+            }
+            self.peak_meter_l
+                .store(new_peak_l, std::sync::atomic::Ordering::Relaxed);
+
+            // RIGHT Meter
+            let current_peak_r = self.peak_meter_r.load(std::sync::atomic::Ordering::Relaxed);
+            let mut new_peak_r = if max_amplitude_in_block_r > current_peak_r {
+                max_amplitude_in_block_r // Attack is instant
+            } else {
+                // Decay
+                current_peak_r * block_decay
+
+            };
+            // SAFETY: If the value is tiny, just kill it so the GUI goes to 0
+            if new_peak_r < 0.001 {
+                new_peak_r = 0.0;
+            }
+            self.peak_meter_r
+                .store(new_peak_r, std::sync::atomic::Ordering::Relaxed);
         }
 
         ProcessStatus::Normal
@@ -254,8 +442,34 @@ impl Plugin for TapeDelay {
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         editor::create(
             self.params.clone(),
+            self.peak_meter_l.clone(),
+            self.peak_meter_r.clone(),
             self.params.editor_state.clone(),
         )
+    }
+}
+
+// Returns (Multiplier, Label)
+// Ordered by musical length (Shortest -> Longest)
+fn get_beat_info(step_index: i32) -> (f32, &'static str) {
+    match step_index {
+        0 => (0.125, "1/32"),    // Straight
+        1 => (0.1667, "1/16 T"), // Triplet
+        2 => (0.1875, "1/32 ."), // Dotted
+        3 => (0.25, "1/16"),
+        4 => (0.3333, "1/8 T"),
+        5 => (0.375, "1/16 ."),
+        6 => (0.5, "1/8"),
+        7 => (0.6667, "1/4 T"),
+        8 => (0.75, "1/8 ."),
+        9 => (1.0, "1/4"),
+        10 => (1.3333, "1/2 T"),
+        11 => (1.5, "1/4 ."),
+        12 => (2.0, "1/2"),
+        13 => (2.6667, "1/1 T"), // Whole Triplet
+        14 => (3.0, "1/2 ."),
+        15 => (4.0, "1 Bar"),
+        _ => (1.0, "1/4"), // Fallback
     }
 }
 
@@ -280,17 +494,44 @@ fn get_noise(seed: &mut u32) -> f32 {
     (*seed as f32 / u32::MAX as f32) * 2.0 - 1.0 // Returns -1.0 to 1.0
 }
 
+fn get_crackle(seed: &mut u32) -> f32 {
+    // 1. Generate the random number
+    *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+    let random_val = *seed as f32 / u32::MAX as f32;
+
+    // 2. Threshold check (The "Dust Density")
+    if random_val > 0.9995 {
+        // Made it rarer - 0.99 is actually VERY loud/constant
+        // 3. THE FIX: Create a bipolar spike (-1.0 to 1.0)
+        // We use a second quick random calculation or just check a bit
+        if (*seed & 1) == 0 {
+            return 0.2; // Small positive pop
+        } else {
+            return -0.2; // Small negative pop
+        }
+    }
+
+    0.0
+}
+
 impl Vst3Plugin for TapeDelay {
     const VST3_CLASS_ID: [u8; 16] = *b"TapeDelayPlug123";
-    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
-        &[Vst3SubCategory::Delay, Vst3SubCategory::Modulation, Vst3SubCategory::Fx];
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[
+        Vst3SubCategory::Delay,
+        Vst3SubCategory::Modulation,
+        Vst3SubCategory::Fx,
+    ];
 }
 
 #[inline]
 fn linear_interpolate(buffer: &[f32], read_pos: f32) -> f32 {
     let len = buffer.len();
-    if len == 0 { return 0.0; }
-    if len == 1 { return buffer[0]; }
+    if len == 0 {
+        return 0.0;
+    }
+    if len == 1 {
+        return buffer[0];
+    }
 
     // Use floor to get the integer part safely
     let read_pos_floor = read_pos.floor();

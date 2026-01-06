@@ -17,6 +17,9 @@ parking_lot = "0.12.5"
 rand = "0.8.5"
 image = "0.24"
 
+vizia = { git = "https://github.com/robbert-vdh/vizia.git", tag = "patched-2024-05-06", default-features = false, features = ["baseview", "clipboard", "x11"] }
+
+
 [workspace]
 members = [
     "xtask",

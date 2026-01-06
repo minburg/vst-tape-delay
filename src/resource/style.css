@@ -15,6 +15,52 @@
     child-bottom: 20px;
 }
 
+.meter-section {
+    background-color: rgba(40, 12, 85, 0);
+    /*child-space: 50px;*/
+    width: 1s;
+    col-between: 60px;
+    /* This adds padding to the far left and far right of the whole row */
+    child-left: 120px;
+    child-right: 120px;
+    child-bottom: 20px;
+}
+
+.vu-meter {
+    background-color: rgba(0, 0, 0, 0.47);
+    color: #d28819;
+    font-size: 18.0;
+    font-family: "Comfortaa";
+}
+
+.vu-meter-no-text {
+    background-color: rgba(0, 0, 0, 0.47);
+    color: rgba(210, 136, 25, 0);
+    font-size: 18.0;
+    font-family: "Comfortaa";
+}
+
+.sync-button {
+    background-color: #512540;
+    color: #d28819;
+    font-size: 30.0;
+    font-family: "Orbitron";
+}
+.sync-button:hover {
+    background-color: rgba(81, 37, 64, 0.5);
+    color: #d28819;
+}
+
+.sync-button:checked {
+    background-color: #d28819;
+    color: #512540;
+}
+.sync-button:hover:checked {
+    background-color: rgba(210, 136, 25, 0.5);
+    color: #512540;
+}
+
+
 .title-section {
     width: 1s;
     height: 180px;
