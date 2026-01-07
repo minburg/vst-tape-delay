@@ -595,17 +595,24 @@ fn get_noise(seed: &mut u32) -> f32 {
 }
 
 fn get_crackle(seed: &mut u32, threshold: f32) -> f32 {
+    // 1. Roll for Magnitude (Will we crackle?)
     *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
     let random_val = *seed as f32 / u32::MAX as f32;
 
     if random_val > threshold {
-        // Bipolar pop
-        if (*seed & 1) == 0 {
-            return 0.2;
+        // 2. Roll again for Polarity (Positive or Negative?)
+        // This decouples the "when" from the "which direction"
+        *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+
+        // We can check the top bit (MSB) which is the most random part of an LCG
+        // 0x80000000 is the binary mask for the first bit
+        if (*seed & 0x80000000) != 0 {
+            return 0.2; // Positive pop
         } else {
-            return -0.2;
+            return -0.2; // Negative pop
         }
     }
+
     0.0
 }
 
