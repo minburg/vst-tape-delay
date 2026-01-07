@@ -42,6 +42,9 @@ pub struct TapeDelay {
     meter_decay_per_sample: f32,
     peak_meter_l: Arc<AtomicF32>,
     peak_meter_r: Arc<AtomicF32>,
+
+    crackle_integrator_l: f32, // New state for Left
+    crackle_integrator_r: f32, // New state for Right
 }
 
 #[derive(Params)]
@@ -176,6 +179,8 @@ impl Default for TapeDelay {
             meter_decay_per_sample: 1.0,
             peak_meter_l: Arc::new(AtomicF32::new(0.0)), // 0.0 Linear = Silence
             peak_meter_r: Arc::new(AtomicF32::new(0.0)),
+            crackle_integrator_l: 0.0,
+            crackle_integrator_r: 0.0,
         }
     }
 }
@@ -396,10 +401,22 @@ impl Plugin for TapeDelay {
 
                 // 2. Generate Dust/Noise
                 let noise = get_noise(&mut self.rng_seed) * compensated_noise_amt;
-                let crackle = get_crackle(&mut self.rng_seed, crackle_threshold) * compensated_crackle_amt;
+                // 1. Get the Impulse (The single-sample spike)
+                // Pass the threshold we calculated earlier
+                let crackle_impulse = get_crackle(&mut self.rng_seed, crackle_threshold);
 
-                // 3. Feedback Processing Chain (The "Secret Sauce")
-                // We take the delayed signal and process it BEFORE putting it back in the buffer.
+                // 2. Add Impulse to Integrator
+                // If impulse is 0.0, nothing changes. If it's 0.2, the value jumps up.
+                self.crackle_integrator_l += crackle_impulse;
+
+                // 3. Apply Decay (The "Body" of the sound)
+                // 0.9 means the click lasts about 20-40 samples (short click).
+                // 0.98 means it lasts ~200 samples (thumpier pop).
+                // Try 0.95 as a sweet spot.
+                self.crackle_integrator_l *= 0.95;
+
+                // 4. Use the INTEGRATOR as your audio signal, not the impulse
+                let crackle = self.crackle_integrator_l * compensated_crackle_amt;
 
                 // A. Tone Loss (Filtering)
                 // Simulates the high-frequency loss of magnetic tape
@@ -446,7 +463,11 @@ impl Plugin for TapeDelay {
                 let input_r = *sample_r;
                 let raw_delayed_r = linear_interpolate(&self.delay_buffer_r, read_pos);
                 let noise = get_noise(&mut self.rng_seed) * compensated_noise_amt;
-                let crackle = get_crackle(&mut self.rng_seed, crackle_threshold) * compensated_crackle_amt;
+                let crackle_impulse = get_crackle(&mut self.rng_seed, crackle_threshold);
+                self.crackle_integrator_r += crackle_impulse;
+                self.crackle_integrator_r *= 0.95; // Same decay coefficient
+
+                let crackle = self.crackle_integrator_r * compensated_crackle_amt;
 
                 let filtered_feedback = one_pole_lp(raw_delayed_r, &mut self.lp_state_r, current_tone_cutoff);
                 let mut signal_to_record =
