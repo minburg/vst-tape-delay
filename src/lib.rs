@@ -291,6 +291,16 @@ impl Plugin for TapeDelay {
         // Wasted tape is much darker (lower cutoff)
         let current_tone_cutoff = if is_broken { 0.25 } else { 0.5 };
 
+        // --- CALCULATE CRACKLE THRESHOLD ---
+        // How many pops per second do we want?
+        // 3.0 Hz = 3 pops per second (approx one every 333ms)
+        let target_crackle_hz = 3.0;
+        // Calculate probability: 3.0 / 44100.0 = 0.000068...
+        let probability_crackle = target_crackle_hz / sample_rate;
+        // The random generator produces 0.0 to 1.0.
+        // We want the top 0.000068% of values.
+        let crackle_threshold = 1.0 - probability_crackle;
+
         if buffer_len == 0 {
             return ProcessStatus::Normal;
         }
@@ -323,12 +333,16 @@ impl Plugin for TapeDelay {
             let mix_amt = self.params.mix.smoothed.next();
             let gain_amt = self.params.gain.smoothed.next();
 
-            // A. Noise Compensation
-            // Since soft_clip will multiply everything by 'drive_amt', we divide the noise
-            // by 'drive_amt' first. This ensures the noise level stays constant
-            // regardless of how distorted the tape is.
-            let compensated_noise_amt = noise_amount / gain_amt;
-            let compensated_crackle_amt = crackle_amount / gain_amt;
+            let feedback_gain = (self.params.feedback.smoothed.next() * 1.2) / gain_amt.sqrt();
+            let makeup_gain = 1.0 / gain_amt.powf(0.35);
+
+            // 3. NOISE COMPENSATION
+            // We divide by (gain * makeup) to ensure the final output volume of the noise
+            // stays constant, regardless of how much we drive or attenuate the signal.
+            // Logic: Input / (G*M) * G * M = Input.
+            let compensation_factor = gain_amt * makeup_gain;
+            let compensated_noise_amt = noise_amount / compensation_factor;
+            let compensated_crackle_amt = crackle_amount / compensation_factor;
             // B. Feedback Compensation
             // We want High Drive to create specific "gritty" textures, but not instant self-oscillation.
             // We scale feedback down as drive goes up.
@@ -337,10 +351,6 @@ impl Plugin for TapeDelay {
             // Allow feedback to go > 100%.
             // If param is 1.0, internal feedback is 1.2.
             // This ensures the loop gets louder than the input.
-            let feedback_gain = (self.params.feedback.smoothed.next() * 1.2) / gain_amt.sqrt();
-
-            let makeup_gain = 1.0 / gain_amt.sqrt();
-
 
             // --- 1. CALCULATE DROPOUTS (The new mechanics) ---
             let mut vol_mod = 1.0;
@@ -386,7 +396,7 @@ impl Plugin for TapeDelay {
 
                 // 2. Generate Dust/Noise
                 let noise = get_noise(&mut self.rng_seed) * compensated_noise_amt;
-                let crackle = get_crackle(&mut self.rng_seed) * compensated_crackle_amt;
+                let crackle = get_crackle(&mut self.rng_seed, crackle_threshold) * compensated_crackle_amt;
 
                 // 3. Feedback Processing Chain (The "Secret Sauce")
                 // We take the delayed signal and process it BEFORE putting it back in the buffer.
@@ -436,7 +446,7 @@ impl Plugin for TapeDelay {
                 let input_r = *sample_r;
                 let raw_delayed_r = linear_interpolate(&self.delay_buffer_r, read_pos);
                 let noise = get_noise(&mut self.rng_seed) * compensated_noise_amt;
-                let crackle = get_crackle(&mut self.rng_seed) * compensated_crackle_amt;
+                let crackle = get_crackle(&mut self.rng_seed, crackle_threshold) * compensated_crackle_amt;
 
                 let filtered_feedback = one_pole_lp(raw_delayed_r, &mut self.lp_state_r, current_tone_cutoff);
                 let mut signal_to_record =
@@ -563,23 +573,18 @@ fn get_noise(seed: &mut u32) -> f32 {
     (*seed as f32 / u32::MAX as f32) * 2.0 - 1.0 // Returns -1.0 to 1.0
 }
 
-fn get_crackle(seed: &mut u32) -> f32 {
-    // 1. Generate the random number
+fn get_crackle(seed: &mut u32, threshold: f32) -> f32 {
     *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
     let random_val = *seed as f32 / u32::MAX as f32;
 
-    // 2. Threshold check (The "Dust Density")
-    if random_val > 0.9995 {
-        // Made it rarer - 0.99 is actually VERY loud/constant
-        // 3. THE FIX: Create a bipolar spike (-1.0 to 1.0)
-        // We use a second quick random calculation or just check a bit
+    if random_val > threshold {
+        // Bipolar pop
         if (*seed & 1) == 0 {
-            return 0.2; // Small positive pop
+            return 0.2;
         } else {
-            return -0.2; // Small negative pop
+            return -0.2;
         }
     }
-
     0.0
 }
 
