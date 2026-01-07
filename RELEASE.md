@@ -7,6 +7,7 @@ This project utilizes an automated CI/CD pipeline via GitHub Actions to build, b
 ## 1. Triggering a New Release
 
 The build workflow is triggered specifically by **Git Tags**. When you are ready to publish a new version, create a tag starting with a lowercase `v`.
+Make sure to push to main branch first before tagging.
 
 ### Step A: Create a Tag
 Use the `-a` flag for an annotated tag. This allows you to include a brief summary of the changes.
