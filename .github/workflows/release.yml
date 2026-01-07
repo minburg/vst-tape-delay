@@ -1,0 +1,101 @@
+name: Build and Release VST3
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  package:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: tape_delay-win-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: tape_delay-macos-universal
+
+    name: Package ${{ matrix.artifact_name }}
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # --- MACOS UNIVERSAL LOGIC ---
+      - name: Add extra targets for macOS universal
+        if: matrix.os == 'macos-latest'
+        run: rustup target add x86_64-apple-darwin
+
+      - name: Build and Bundle
+        run: |
+          if [ "${{ matrix.os }}" == "macos-latest" ]; then
+            # Build both architectures
+            cargo build --release --target x86_64-apple-darwin --lib
+            cargo build --release --target aarch64-apple-darwin --lib
+          
+            # Generate bundle structure
+            cargo xtask bundle tape_delay --profile release
+          
+            # Stitch binaries with lipo
+            lipo -create \
+              -output target/bundled/tape_delay.vst3/Contents/MacOS/tape_delay \
+              target/x86_64-apple-darwin/release/libtape_delay.dylib \
+              target/aarch64-apple-darwin/release/libtape_delay.dylib
+          else
+            # Windows build
+            cargo xtask bundle tape_delay --profile release
+          fi
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: target/bundled/
+
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Zip Artifacts for Release
+        run: |
+          cd artifacts
+          # Zip Windows bundle
+          zip -r ../tape_delay-v${{ steps.get_version.outputs.VERSION }}-win64.zip tape_delay-win-x64/*
+          # Zip macOS bundle (preserving symlinks and permissions)
+          zip -ry ../tape_delay-v${{ steps.get_version.outputs.VERSION }}-macos.zip tape_delay-macos-universal/*
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            *.zip
+          name: Release v${{ steps.get_version.outputs.VERSION }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,6 +1,5 @@
-
 use nih_plug::prelude::*;
-use convolution_vst::TapeDelay;
+use tape_delay::TapeDelay;
 
 fn main() {
     nih_export_standalone::<TapeDelay>();

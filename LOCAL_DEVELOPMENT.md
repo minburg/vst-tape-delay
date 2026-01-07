@@ -1,5 +1,5 @@
 run 
-cargo xtask bundle convolution_vst --release
+cargo xtask bundle tape_delay --release
 to get the vst3 plugin under target/bundled
 
 run

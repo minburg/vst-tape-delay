@@ -899,18 +899,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6245d59a3e82a7fc217c5828a6692dbc6dfb63a0c8c90495621f7b9d79704a0e"
 
 [[package]]
-name = "convolution_vst"
-version = "0.1.1"
-dependencies = [
- "image",
- "nih_plug",
- "nih_plug_vizia",
- "parking_lot",
- "rand 0.8.5",
- "vizia",
-]
-
-[[package]]
 name = "copypasta"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3490,6 +3478,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "tape_delay"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "nih_plug",
+ "nih_plug_vizia",
+ "parking_lot",
+ "rand 0.8.5",
+ "vizia",
 ]
 
 [[package]]

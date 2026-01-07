@@ -1,3 +1,20 @@
+/*
+ * Copyright (C) 2026 [Your Name/Company]
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 use nih_plug::prelude::*;
 use nih_plug_vizia::ViziaState;
 use std::sync::atomic::AtomicBool;
@@ -190,7 +207,7 @@ impl Plugin for TapeDelay {
     const VENDOR: &'static str = "Convolution DEV";
     const URL: &'static str = "https://youtu.be/dQw4w9WgXcQ";
     const EMAIL: &'static str = "email@example.com";
-    const VERSION: &'static str = "0.0.1";
+    const VERSION: &'static str = "0.1.0";
 
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
         main_input_channels: NonZeroU32::new(2),
@@ -617,7 +634,7 @@ fn get_crackle(seed: &mut u32, threshold: f32) -> f32 {
 }
 
 impl Vst3Plugin for TapeDelay {
-    const VST3_CLASS_ID: [u8; 16] = *b"TapeDelayPlug123";
+    const VST3_CLASS_ID: [u8; 16] = *b"ConvolutionDelay";
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[
         Vst3SubCategory::Delay,
         Vst3SubCategory::Modulation,
