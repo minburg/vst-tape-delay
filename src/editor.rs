@@ -97,13 +97,22 @@ pub(crate) fn create(
                     .height(Pixels(45.0));
                 })
                 .height(Stretch(1.0))
-                .width(Stretch(0.5));
+                .width(Stretch(1.5));
 
-                Element::new(cx).width(Stretch(0.2)).height(Stretch(1.0));
+                // Element::new(cx).width(Stretch(0.1)).height(Stretch(1.0));
+
+                ParamButton::new(cx, Data::tape_data, |params| &params.broken_tape)
+                    .width(Stretch(0.45))
+                    .height(Stretch(0.6))
+                    .child_left(Stretch(1.0))
+                    .child_right(Stretch(1.0))
+                    .class("broken-button");
 
                 ParamButton::new(cx, Data::tape_data, |params| &params.time_sync)
-                    // .width(Stretch(0.3))
+                    .width(Stretch(0.6))
                     .height(Stretch(0.6))
+                    .child_left(Stretch(1.0))
+                    .child_right(Stretch(1.0))
                     .class("sync-button");
             })
             .width(Stretch(0.8))

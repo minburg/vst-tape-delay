@@ -7,7 +7,7 @@ use std::sync::Arc;
 mod editor;
 
 const TIME_MS_MIN: f32 = 1.0;
-const TIME_MS_MAX: f32 = 1000.0;
+const TIME_MS_MAX: f32 = 1500.0;
 
 pub struct TapeDelay {
     params: Arc<TapeParams>,
@@ -34,6 +34,10 @@ pub struct TapeDelay {
     // Needs to persist so the noise doesn't repeat identical patterns every buffer
     rng_seed: u32,
 
+    // Tracks the current "health" of the signal (0.0 to 1.0)
+    // We smooth this so volume dips are wobbly, not instant.
+    dropout_smoother: f32,
+
     /// The decay factor for a single sample
     meter_decay_per_sample: f32,
     peak_meter_l: Arc<AtomicF32>,
@@ -55,6 +59,8 @@ struct TapeParams {
     pub is_sync_active: Arc<AtomicBool>,
     #[id = "time_sync"]
     pub time_sync: BoolParam,
+    #[id = "broken_tape"]
+    pub broken_tape: BoolParam,
     #[id = "feedback"]
     pub feedback: FloatParam,
     #[id = "mix"]
@@ -64,21 +70,27 @@ struct TapeParams {
 impl Default for TapeParams {
     fn default() -> Self {
         // Create the shared memory flag
-        let is_sync_active = Arc::new(AtomicBool::new(false));
+        let is_time_sync_active = Arc::new(AtomicBool::new(false));
 
         // Clone it for the closure
-        let flag_for_formatter = is_sync_active.clone();
-        let flag_for_callback = is_sync_active.clone();
+        let time_sync_flag_for_formatter = is_time_sync_active.clone();
+        let time_sync_flag_for_callback = is_time_sync_active.clone();
+
+        // Create the shared memory flag
+        let is_tape_broken = Arc::new(AtomicBool::new(false));
+
+        // Clone it for the closure
+        let tape_broken_flag_for_callback = is_tape_broken.clone();
 
         Self {
-            is_sync_active, // Store original in struct
+            is_sync_active: is_tape_broken, // Store original in struct
             editor_state: editor::default_state(),
 
             gain: FloatParam::new(
                 "Gaen",
-                1.2,
+                1.0,
                 FloatRange::Linear {
-                    min: 0.5,
+                    min: 1.0,
                     max: 10.0,
                 },
             )
@@ -96,11 +108,11 @@ impl Default for TapeParams {
             .with_smoother(SmoothingStyle::Linear(15.0))
             .with_value_to_string(Arc::new(move |value| {
                 // Check the flag
-                if flag_for_formatter.load(Ordering::Relaxed) {
+                if time_sync_flag_for_formatter.load(Ordering::Relaxed) {
                     // --- SYNC MODE DISPLAY ---
                     // Map 1.0-1000.0 back to 0-15 index
-                    let normalized = (value - 1.0) / (1000.0 - 1.0);
-                    let step_index = (normalized * 15.99).floor() as i32;
+                    let normalized = (value - TIME_MS_MIN) / (TIME_MS_MAX - TIME_MS_MIN);
+                    let step_index = (normalized * 17.99).floor() as i32;
 
                     // Get the label (e.g., "1/8 .")
                     let (_, label) = get_beat_info(step_index);
@@ -113,7 +125,11 @@ impl Default for TapeParams {
 
             time_sync: BoolParam::new("Time Sync", false).with_callback(Arc::new(move |value| {
                 // When user clicks button, update the flag!
-                flag_for_callback.store(value, Ordering::Relaxed);
+                time_sync_flag_for_callback.store(value, Ordering::Relaxed);
+            })),
+            broken_tape: BoolParam::new("Broken", false).with_callback(Arc::new(move |value| {
+                // When user clicks button, update the flag!
+                tape_broken_flag_for_callback.store(value, Ordering::Relaxed);
             })),
 
             feedback: FloatParam::new(
@@ -156,6 +172,7 @@ impl Default for TapeDelay {
 
             // Seed can be any non-zero integer
             rng_seed: 12345,
+            dropout_smoother: 1.0, // Start with perfect health
             meter_decay_per_sample: 1.0,
             peak_meter_l: Arc::new(AtomicF32::new(0.0)), // 0.0 Linear = Silence
             peak_meter_r: Arc::new(AtomicF32::new(0.0)),
@@ -268,8 +285,11 @@ impl Plugin for TapeDelay {
         let flutter_rate = 2.0 * std::f32::consts::PI * (1.5 / sample_rate); // 1.5 Hz wobble
         let flutter_depth = 15.0; // The depth of the pitch wobble in samples
         let noise_amount = 0.005; // Background hiss level (was 0.002)
-        let crackle_amount = 0.08; // Background hiss level (was 0.002)
-        let tone_cutoff = 0.5; // Low pass filter coefficient (simulates head degradation)
+        let crackle_amount = 0.15; // Background crackle level
+        let is_broken = self.params.broken_tape.value();
+        // adjust constants based on mode
+        // Wasted tape is much darker (lower cutoff)
+        let current_tone_cutoff = if is_broken { 0.25 } else { 0.5 };
 
         if buffer_len == 0 {
             return ProcessStatus::Normal;
@@ -300,15 +320,56 @@ impl Plugin for TapeDelay {
             let mod_delay_samples = (self.current_delay_samples + flutter_offset).max(0.0);
 
             // Get Parameter Values
-            let feedback_amt = self.params.feedback.smoothed.next();
-            // Allow feedback to go > 100%.
-            // If param is 1.0, internal feedback is 1.2.
-            // This ensures the loop gets louder than the input.
-            let feedback_gain = feedback_amt * 1.2;
             let mix_amt = self.params.mix.smoothed.next();
             let gain_amt = self.params.gain.smoothed.next();
 
+            // A. Noise Compensation
+            // Since soft_clip will multiply everything by 'drive_amt', we divide the noise
+            // by 'drive_amt' first. This ensures the noise level stays constant
+            // regardless of how distorted the tape is.
+            let compensated_noise_amt = noise_amount / gain_amt;
+            let compensated_crackle_amt = crackle_amount / gain_amt;
+            // B. Feedback Compensation
+            // We want High Drive to create specific "gritty" textures, but not instant self-oscillation.
+            // We scale feedback down as drive goes up.
+            // Using .sqrt() is a musical sweet spot: Higher drive will still feedback MORE than
+            // clean tape (exciting!), but not 10x more.
+            // Allow feedback to go > 100%.
+            // If param is 1.0, internal feedback is 1.2.
+            // This ensures the loop gets louder than the input.
+            let feedback_gain = (self.params.feedback.smoothed.next() * 1.2) / gain_amt.sqrt();
+
             let makeup_gain = 1.0 / gain_amt.sqrt();
+
+
+            // --- 1. CALCULATE DROPOUTS (The new mechanics) ---
+            let mut vol_mod = 1.0;
+
+            if is_broken {
+                // A. Generate "Bad Spots"
+                // We use a high threshold on the RNG.
+                // 0.9997 means a dropout happens roughly every 3000-4000 samples (~0.1 sec)
+                let rand_val = get_noise(&mut self.rng_seed).abs(); // 0.0 to 1.0
+
+                let target_health = if rand_val > 0.9995 {
+                    0.1 // Deep dropout (almost silent)
+                } else if rand_val > 0.99 {
+                    0.7 // Minor fluctuation
+                } else {
+                    1.0 // Healthy tape
+                };
+
+                // B. Smooth the dropout (Slew Limiting)
+                // This creates the "fading" effect of a dropout rather than a click.
+                // 0.005 is the reaction speed.
+                self.dropout_smoother += (target_health - self.dropout_smoother) * 0.005;
+
+                vol_mod = self.dropout_smoother;
+            } else {
+                // Reset to healthy if mode is off
+                self.dropout_smoother = 1.0;
+            }
+
 
             // --- READ HEAD CALCULATION ---
             let read_pos =
@@ -324,21 +385,27 @@ impl Plugin for TapeDelay {
                 let raw_delayed_l = linear_interpolate(&self.delay_buffer_l, read_pos);
 
                 // 2. Generate Dust/Noise
-                let noise = get_noise(&mut self.rng_seed) * noise_amount;
-                let crackle = get_crackle(&mut self.rng_seed) * crackle_amount;
+                let noise = get_noise(&mut self.rng_seed) * compensated_noise_amt;
+                let crackle = get_crackle(&mut self.rng_seed) * compensated_crackle_amt;
 
                 // 3. Feedback Processing Chain (The "Secret Sauce")
                 // We take the delayed signal and process it BEFORE putting it back in the buffer.
 
                 // A. Tone Loss (Filtering)
                 // Simulates the high-frequency loss of magnetic tape
-                let filtered_feedback =
-                    one_pole_lp(raw_delayed_l, &mut self.lp_state_l, tone_cutoff);
+                // Use current_tone_cutoff which changes based on mode
+                let filtered_feedback = one_pole_lp(raw_delayed_l, &mut self.lp_state_l, current_tone_cutoff);
 
                 // B. Summing
                 // Add input + filtered feedback + a little noise
                 let mut signal_to_record =
                     input_l + (filtered_feedback * feedback_gain) + noise + crackle;
+
+                // --- APPLY WASTED EFFECTS ---
+                // We apply the dropout *before* saturation.
+                // This mimics the tape head losing contact with the magnetic medium.
+                // It effectively lowers the drive momentarily, cleaning up the sound while quieting it.
+                signal_to_record *= vol_mod;
 
                 // C. Tape Saturation (Soft Clipping)
                 // This is CRITICAL. It squashes the signal.
@@ -368,14 +435,14 @@ impl Plugin for TapeDelay {
             if let Some(sample_r) = samples.next() {
                 let input_r = *sample_r;
                 let raw_delayed_r = linear_interpolate(&self.delay_buffer_r, read_pos);
-                let noise = get_noise(&mut self.rng_seed) * noise_amount;
-                let crackle = get_crackle(&mut self.rng_seed) * crackle_amount;
+                let noise = get_noise(&mut self.rng_seed) * compensated_noise_amt;
+                let crackle = get_crackle(&mut self.rng_seed) * compensated_crackle_amt;
 
-                let filtered_feedback =
-                    one_pole_lp(raw_delayed_r, &mut self.lp_state_r, tone_cutoff);
+                let filtered_feedback = one_pole_lp(raw_delayed_r, &mut self.lp_state_r, current_tone_cutoff);
                 let mut signal_to_record =
                     input_r + (filtered_feedback * feedback_gain) + noise + crackle;
 
+                signal_to_record *= vol_mod;
                 signal_to_record = soft_clip(signal_to_record, gain_amt);
 
                 if let Some(buf_val) = self.delay_buffer_r.get_mut(self.write_pos) {
@@ -453,22 +520,24 @@ impl Plugin for TapeDelay {
 // Ordered by musical length (Shortest -> Longest)
 fn get_beat_info(step_index: i32) -> (f32, &'static str) {
     match step_index {
-        0 => (0.125, "1/32"),    // Straight
-        1 => (0.1667, "1/16 T"), // Triplet
-        2 => (0.1875, "1/32 ."), // Dotted
-        3 => (0.25, "1/16"),
-        4 => (0.3333, "1/8 T"),
-        5 => (0.375, "1/16 ."),
-        6 => (0.5, "1/8"),
-        7 => (0.6667, "1/4 T"),
-        8 => (0.75, "1/8 ."),
-        9 => (1.0, "1/4"),
-        10 => (1.3333, "1/2 T"),
-        11 => (1.5, "1/4 ."),
-        12 => (2.0, "1/2"),
-        13 => (2.6667, "1/1 T"), // Whole Triplet
-        14 => (3.0, "1/2 ."),
-        15 => (4.0, "1 Bar"),
+        0 => (0.0625, "1/64"),    // Straight
+        1 => (0.125, "1/32"),    // Straight
+        2 => (0.1667, "1/16 T"), // Triplet
+        3 => (0.1875, "1/32 ."), // Dotted
+        4 => (0.25, "1/16"),
+        5 => (0.3333, "1/8 T"),
+        6 => (0.375, "1/16 ."),
+        7 => (0.5, "1/8"),
+        8 => (0.6667, "1/4 T"),
+        9 => (0.75, "1/8 ."),
+        10 => (1.0, "1/4"),
+        11 => (1.3333, "1/2 T"),
+        12 => (1.5, "1/4 ."),
+        13 => (2.0, "1/2"),
+        14 => (2.6667, "1/1 T"), // Whole Triplet
+        15 => (3.0, "1/2 ."),
+        16 => (4.0, "1 Bar"),
+        17 => (8.0, "2 Bar"),
         _ => (1.0, "1/4"), // Fallback
     }
 }

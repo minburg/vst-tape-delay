@@ -44,7 +44,8 @@
     background-color: #512540;
     color: #d28819;
     font-size: 30.0;
-    font-family: "Orbitron";
+    font-weight: bold;
+    font-family: "Comfortaa";
 }
 .sync-button:hover {
     background-color: rgba(81, 37, 64, 0.5);
@@ -60,6 +61,27 @@
     color: #512540;
 }
 
+.broken-button {
+    background-color: #512540;
+    color: #d28819;
+    font-size: 30.0;
+    font-weight: bold;
+    font-family: "Comfortaa";
+}
+
+.broken-button:hover {
+    background-color: rgba(81, 37, 64, 0.5);
+    color: #d28819;
+}
+
+.broken-button:checked {
+    background-color: #d23519;
+    color: #512540;
+}
+.broken-button:hover:checked {
+    background-color: rgba(210, 53, 25, 0.5);
+    color: #512540;
+}
 
 .title-section {
     width: 1s;
