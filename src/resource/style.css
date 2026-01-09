@@ -19,11 +19,15 @@
     background-color: rgba(40, 12, 85, 0);
     /*child-space: 50px;*/
     width: 1s;
-    col-between: 25px;
+    col-between: 40px;
     /* This adds padding to the far left and far right of the whole row */
     child-left: 100px;
     child-right: 100px;
-    child-bottom: 20px;
+    /*child-bottom: 20px;*/
+
+    border-radius: 0px;
+    border-width: 1px;
+    border-color: rgba(126, 126, 126, 0);
 }
 
 .vu-meter {
@@ -137,7 +141,7 @@
     font-family: "Comfortaa";
 }
 
-.knob_container {
+.knob-container {
     width: 1s;
     /*child_space: 1s;*/
     /*height: 1s;*/
@@ -154,18 +158,48 @@
     border-color: #934aff;
 }
 
-.knob_arc {
+.knob-arc {
     background-color: #74355C;
     color: #d28819;
 }
 
-.knob_hitbox {
+.knob-hitbox {
     background-color: rgba(0, 0, 0, 0.5);
     border-radius: 50%;
 }
 
 .param-label {
     color: #d28819;
-    font-size: 30.0;
+    font-size: 28.0;
     font-family: "Orbitron";
+}
+
+.single-knob-label {
+    color: #d28819;
+    font-size: 15.0;
+    font-family: "Comfortaa";
+}
+
+.single-knob-arc {
+    background-color: #74355C;
+    color: #d28819;
+}
+
+.single-knob-hitbox {
+    background-color: rgba(0, 0, 0, 0);
+    border-radius: 50%;
+}
+
+.finetune-section {
+    col-between: 60px;
+    child-left: 400px;
+    child-right: 400px;
+    child-bottom: 20px;
+    child-top: 20px;
+}
+.finetune-section-inner {
+    background-color: rgba(0, 0, 0, 0.3);
+    border-radius: 8px;
+    border-width: 2px;
+    border-color: rgba(126, 126, 126, 1.0);
 }

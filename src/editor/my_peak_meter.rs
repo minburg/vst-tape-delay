@@ -4,8 +4,8 @@ use nih_plug::prelude::util;
 use std::cell::Cell;
 use std::time::Duration;
 use std::time::Instant;
-use vizia::prelude::*;
-use vizia::vg;
+use nih_plug_vizia::vizia::prelude::*;
+use nih_plug_vizia::vizia::vg;
 
 /// The thickness of a tick inside of the peak meter's bar.
 const TICK_WIDTH: f32 = 1.0;

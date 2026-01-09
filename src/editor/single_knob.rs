@@ -3,18 +3,18 @@ use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::widgets::param_base::ParamWidgetBase;
 
 #[derive(Debug)]
-pub enum ParamEvent {
+pub enum SingleKnobEvent {
     BeginSetParam,
     SetParam(f32),
     EndSetParam,
 }
 
 #[derive(Lens)]
-pub struct ParamKnob {
+pub struct SingleKnob {
     param_base: ParamWidgetBase,
 }
 
-impl ParamKnob {
+impl SingleKnob {
     pub fn new<L, Params, P, FMap>(
         cx: &mut Context,
         params: L,
@@ -33,22 +33,30 @@ impl ParamKnob {
         .build(
             cx,
             ParamWidgetBase::build_view(params, params_to_param, move |cx, param_data| {
-                VStack::new(cx, |cx| {
-                    Label::new(
-                        cx,
-                        params.map(move |params| {
-                            params_to_param(params)
-                                .normalized_value_to_string(
-                                    params_to_param(params)
-                                        .modulated_normalized_value()
-                                        .to_owned(),
-                                    true,
-                                )
-                                .to_owned()
-                        }),
-                    )
-                    .class("param-label")
-                    .space(Stretch(0.8));
+                ZStack::new(cx, |cx| {
+                    VStack::new(cx, |cx| {
+                        Label::new(
+                            cx,
+                            params.map(move |params| params_to_param(params).name().to_owned()),
+                        )
+                        .class("single-knob-label");
+                        Label::new(
+                            cx,
+                            params.map(move |params| {
+                                params_to_param(params)
+                                    .normalized_value_to_string(
+                                        params_to_param(params)
+                                            .modulated_normalized_value()
+                                            .to_owned(),
+                                        true,
+                                    )
+                                    .to_owned()
+                            }),
+                        )
+                        .class("single-knob-label");
+                    })
+                    .row_between(Pixels(6.0))
+                    .child_space(Stretch(1.0));
 
                     Knob::custom(
                         cx,
@@ -61,63 +69,55 @@ impl ParamKnob {
                             ZStack::new(cx, |cx| {
                                 // Transparent "Hit Surface" to capture mouse everywhere
                                 Element::new(cx)
-                                    .width(Pixels(120.0))
-                                    .height(Pixels(120.0))
-                                    .class("knob-hitbox");
+                                    .width(Pixels(80.0))
+                                    .height(Pixels(80.0))
+                                    .class("single-knob-hitbox");
 
                                 // Visual Arc
                                 ArcTrack::new(
                                     cx,
                                     centered,
-                                    Percentage(500.0),
-                                    Percentage(20.),
+                                    Percentage(330.0),
+                                    Percentage(13.2),
                                     -150.,
                                     150.,
                                     KnobMode::Continuous,
                                 )
                                 .value(lens)
-                                .class("knob-arc");
+                                .class("single-knob-arc");
                             })
                             .child_space(Stretch(1.0))
-                            .width(Pixels(160.0))
-                            .height(Pixels(160.0))
+                            .width(Pixels(99.0))
+                            .height(Pixels(99.0))
                         },
                     )
-                    .space(Stretch(0.8))
+                    .space(Stretch(1.0))
                     .on_mouse_down(move |cx, _button| {
-                        cx.emit(ParamEvent::BeginSetParam);
+                        cx.emit(SingleKnobEvent::BeginSetParam);
                     })
                     .on_changing(move |cx, val| {
-                        cx.emit(ParamEvent::SetParam(val));
+                        cx.emit(SingleKnobEvent::SetParam(val));
                     })
                     .on_mouse_up(move |cx, _button| {
-                        cx.emit(ParamEvent::EndSetParam);
+                        cx.emit(SingleKnobEvent::EndSetParam);
                     });
-
-                    Label::new(
-                        cx,
-                        params.map(move |params| params_to_param(params).name().to_owned()),
-                    )
-                    .space(Stretch(0.6))
-                    .top(Stretch(0.))
-                    .class("param-label");
                 })
-                .class("knob-container");
+                .child_space(Stretch(1.0));
             }),
         )
     }
 }
 
-impl View for ParamKnob {
+impl View for SingleKnob {
     fn event(&mut self, cx: &mut EventContext, event: &mut Event) {
         event.map(|param_change_event, _| match param_change_event {
-            ParamEvent::BeginSetParam => {
+            SingleKnobEvent::BeginSetParam => {
                 self.param_base.begin_set_parameter(cx);
             }
-            ParamEvent::SetParam(val) => {
+            SingleKnobEvent::SetParam(val) => {
                 self.param_base.set_normalized_value(cx, *val);
             }
-            ParamEvent::EndSetParam => {
+            SingleKnobEvent::EndSetParam => {
                 self.param_base.end_set_parameter(cx);
             }
         });
