@@ -81,6 +81,8 @@ struct TapeParams {
     pub time_sync: BoolParam,
     #[id = "broken_tape"]
     pub broken_tape: BoolParam,
+    #[id = "distortion_mode"]
+    pub distortion_mode: BoolParam,
     #[id = "feedback"]
     pub feedback: FloatParam,
     #[id = "mix"]
@@ -101,6 +103,12 @@ impl Default for TapeParams {
 
         // Clone it for the closure
         let tape_broken_flag_for_callback = is_tape_broken.clone();
+
+        // Create distortion mode flag for formatters
+        let is_distortion_mode = Arc::new(AtomicBool::new(false));
+        let distortion_flag_for_callback = is_distortion_mode.clone();
+        let distortion_flag_for_feedback_formatter = is_distortion_mode.clone();
+        let distortion_flag_for_mix_formatter = is_distortion_mode.clone();
 
         Self {
             is_sync_active: is_tape_broken, // Store original in struct
@@ -151,24 +159,39 @@ impl Default for TapeParams {
                 // When user clicks button, update the flag!
                 tape_broken_flag_for_callback.store(value, Ordering::Relaxed);
             })),
+            distortion_mode: BoolParam::new("Tape Only", false).with_callback(Arc::new(move |value| {
+                distortion_flag_for_callback.store(value, Ordering::Relaxed);
+            })),
 
             feedback: FloatParam::new(
                 "Feed-bick",
                 0.3,
                 FloatRange::Linear {
                     min: 0.0,
-                    max: 0.999,
+                    max: 1.0,
                 },
             )
             .with_smoother(SmoothingStyle::Linear(15.0))
             .with_unit(" %")
-            .with_value_to_string(formatters::v2s_f32_percentage(1))
+            .with_value_to_string(Arc::new(move |value| {
+                if distortion_flag_for_feedback_formatter.load(Ordering::Relaxed) {
+                    String::from("0")
+                } else {
+                    format!("{:.0}", value * 100.0)
+                }
+            }))
             .with_string_to_value(formatters::s2v_f32_percentage()),
 
             mix: FloatParam::new("Mic's", 0.3, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_smoother(SmoothingStyle::Linear(15.0))
                 .with_unit(" %")
-                .with_value_to_string(formatters::v2s_f32_percentage(1))
+                .with_value_to_string(Arc::new(move |value| {
+                    if distortion_flag_for_mix_formatter.load(Ordering::Relaxed) {
+                        String::from("0")
+                    } else {
+                        format!("{:.0}", value * 100.0)
+                    }
+                }))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
         }
     }
@@ -238,7 +261,7 @@ impl Plugin for TapeDelay {
         self.delay_buffer_l = vec![0.0; max_samples];
         self.delay_buffer_r = vec![0.0; max_samples];
 
-        let release_db_per_second = 20.0;
+        let release_db_per_second = 40.0;
 
         // Calculate the constant for 1 sample of decay
         // We store this in the struct
@@ -261,6 +284,92 @@ impl Plugin for TapeDelay {
         let sample_rate = self.sample_rate;
         let buffer_len = self.delay_buffer_l.len();
 
+        // Check if we're in distortion mode
+        let is_distortion_mode = self.params.distortion_mode.value();
+
+        // --- DISTORTION MODE: Direct Signal Path ---
+        if is_distortion_mode {
+            let is_broken = self.params.broken_tape.value();
+            let tape_constants = calculate_tape_constants(sample_rate, is_broken);
+
+            let mut max_amplitude_in_block_l: f32 = 0.0;
+            let mut max_amplitude_in_block_r: f32 = 0.0;
+
+            for channel_samples in buffer.iter_samples() {
+                update_lfo_phase(&mut self.lfo_phase, tape_constants.flutter_rate);
+
+                let gain_amt = self.params.gain.smoothed.next();
+                let (makeup_gain, compensated_noise_amt, compensated_crackle_amt) =
+                    calculate_gain_compensation(gain_amt, tape_constants.noise_amount, tape_constants.crackle_amount);
+
+                let vol_mod = update_dropout_smoother(
+                    is_broken,
+                    &mut self.dropout_smoother,
+                    &mut self.rng_seed,
+                    sample_rate,
+                );
+
+                let mut samples = channel_samples.into_iter();
+
+                // --- LEFT CHANNEL DIRECT PROCESSING ---
+                if let Some(sample_l) = samples.next() {
+                    *sample_l = process_direct_distortion_channel(
+                        *sample_l,
+                        &mut self.lp_state_l,
+                        &mut self.rng_seed,
+                        &mut self.crackle_integrator_l,
+                        tape_constants.current_tone_cutoff,
+                        tape_constants.crackle_threshold,
+                        compensated_noise_amt,
+                        compensated_crackle_amt,
+                        vol_mod,
+                        gain_amt,
+                        makeup_gain,
+                    );
+
+                    let abs_l = sample_l.abs();
+                    if abs_l > max_amplitude_in_block_l {
+                        max_amplitude_in_block_l = abs_l;
+                    }
+                }
+
+                // --- RIGHT CHANNEL DIRECT PROCESSING ---
+                if let Some(sample_r) = samples.next() {
+                    *sample_r = process_direct_distortion_channel(
+                        *sample_r,
+                        &mut self.lp_state_r,
+                        &mut self.rng_seed,
+                        &mut self.crackle_integrator_r,
+                        tape_constants.current_tone_cutoff,
+                        tape_constants.crackle_threshold,
+                        compensated_noise_amt,
+                        compensated_crackle_amt,
+                        vol_mod,
+                        gain_amt,
+                        makeup_gain,
+                    );
+
+                    let abs_r = sample_r.abs();
+                    if abs_r > max_amplitude_in_block_r {
+                        max_amplitude_in_block_r = abs_r;
+                    }
+                }
+            }
+
+            update_peak_meters(
+                self.params.editor_state.is_open(),
+                buffer.samples() as f32,
+                self.meter_decay_per_sample,
+                &self.peak_meter_l,
+                &self.peak_meter_r,
+                max_amplitude_in_block_l,
+                max_amplitude_in_block_r,
+            );
+
+            return ProcessStatus::Normal;
+        }
+
+        // --- TAPE DELAY MODE (Original Code) ---
         // 1. DETERMINE TARGET DELAY (Dual Mode Logic)
         let raw_target_samples = if self.params.time_sync.value() {
             // --- SYNC MODE (Stepped) ---
@@ -302,26 +411,9 @@ impl Plugin for TapeDelay {
         // If raw_target is 350,000 but buffer is only 100,000, this snaps it to 99,900.
         let target_delay_samples = raw_target_samples.min(max_safe_samples);
 
-        // TAPE MECHANICS: Setup constants for the "Machine"
-        // In a full plugin, these would be user parameters (e.g., "Age", "Grit")
-        let flutter_rate = 2.0 * std::f32::consts::PI * (1.5 / sample_rate); // 1.5 Hz wobble
-        let flutter_depth = 15.0; // The depth of the pitch wobble in samples
-        let noise_amount = 0.005; // Background hiss level (was 0.002)
-        let crackle_amount = 0.15; // Background crackle level
         let is_broken = self.params.broken_tape.value();
-        // adjust constants based on mode
-        // Wasted tape is much darker (lower cutoff)
-        let current_tone_cutoff = if is_broken { 0.25 } else { 0.5 };
-
-        // --- CALCULATE CRACKLE THRESHOLD ---
-        // How many pops per second do we want?
-        // 3.0 Hz = 3 pops per second (approx one every 333ms)
-        let target_crackle_hz = 3.0;
-        // Calculate probability: 3.0 / 44100.0 = 0.000068...
-        let probability_crackle = target_crackle_hz / sample_rate;
-        // The random generator produces 0.0 to 1.0.
-        // We want the top 0.000068% of values.
-        let crackle_threshold = 1.0 - probability_crackle;
+        let tape_constants = calculate_tape_constants(sample_rate, is_broken);
+        let flutter_depth = 15.0;
 
         if buffer_len == 0 {
             return ProcessStatus::Normal;
@@ -333,74 +425,37 @@ impl Plugin for TapeDelay {
         let mut max_amplitude_in_block_r: f32 = 0.0;
 
         for channel_samples in buffer.iter_samples() {
-            // --- MODULATION (Wow/Flutter) ---
-            // Increment LFO phase. "sin" creates the smooth motor wobble.
-            self.lfo_phase += flutter_rate;
-            if self.lfo_phase > 2.0 * std::f32::consts::PI {
-                self.lfo_phase -= 2.0 * std::f32::consts::PI;
-            }
+            update_lfo_phase(&mut self.lfo_phase, tape_constants.flutter_rate);
             let flutter_offset = self.lfo_phase.sin() * flutter_depth;
 
             // Smooth delay time (Slew Limiting)
-            // This prevents zipper noise when you turn the time knob quickly.
             let smooth_coeff = 0.0005;
             self.current_delay_samples = (self.current_delay_samples * (1.0 - smooth_coeff))
                 + (target_delay_samples * smooth_coeff);
 
-            // FIX: Ensure delay never goes negative (Causality Check)
-            // If delay is 0ms, flutter might make it -15. We clamp to 0.0.
             let mod_delay_samples = (self.current_delay_samples + flutter_offset).max(0.0);
 
-            // Get Parameter Values
-            let mix_amt = self.params.mix.smoothed.next();
-            let gain_amt = self.params.gain.smoothed.next();
-
-            let feedback_gain = (self.params.feedback.smoothed.next() * 1.2) / gain_amt.sqrt();
-            let makeup_gain = 1.0 / gain_amt.powf(0.35);
-
-            // 3. NOISE COMPENSATION
-            // We divide by (gain * makeup) to ensure the final output volume of the noise
-            // stays constant, regardless of how much we drive or attenuate the signal.
-            // Logic: Input / (G*M) * G * M = Input.
-            let compensation_factor = gain_amt * makeup_gain;
-            let compensated_noise_amt = noise_amount / compensation_factor;
-            let compensated_crackle_amt = crackle_amount / compensation_factor;
-            // B. Feedback Compensation
-            // We want High Drive to create specific "gritty" textures, but not instant self-oscillation.
-            // We scale feedback down as drive goes up.
-            // Using .sqrt() is a musical sweet spot: Higher drive will still feedback MORE than
-            // clean tape (exciting!), but not 10x more.
-            // Allow feedback to go > 100%.
-            // If param is 1.0, internal feedback is 1.2.
-            // This ensures the loop gets louder than the input.
-
-            // --- 1. CALCULATE DROPOUTS (The new mechanics) ---
-            let mut vol_mod = 1.0;
-
-            if is_broken {
-                // A. Generate "Bad Spots"
-                // We use a high threshold on the RNG.
-                // 0.9997 means a dropout happens roughly every 3000-4000 samples (~0.1 sec)
-                let rand_val = get_noise(&mut self.rng_seed).abs(); // 0.0 to 1.0
-
-                let target_health = if rand_val > 0.9995 {
-                    0.1 // Deep dropout (almost silent)
-                } else if rand_val > 0.99 {
-                    0.7 // Minor fluctuation
-                } else {
-                    1.0 // Healthy tape
-                };
-
-                // B. Smooth the dropout (Slew Limiting)
-                // This creates the "fading" effect of a dropout rather than a click.
-                // 0.005 is the reaction speed.
-                self.dropout_smoother += (target_health - self.dropout_smoother) * 0.005;
-
-                vol_mod = self.dropout_smoother;
+            let mix_amt = if is_distortion_mode {
+                0.0
             } else {
-                // Reset to healthy if mode is off
-                self.dropout_smoother = 1.0;
-            }
+                self.params.mix.smoothed.next()
+            };
+            let gain_amt = self.params.gain.smoothed.next();
+            let feedback_gain = if is_distortion_mode {
+                0.0
+            } else {
+                (self.params.feedback.smoothed.next() * 1.2) / gain_amt.sqrt()
+            };
+
+            let (makeup_gain, compensated_noise_amt, compensated_crackle_amt) =
+                calculate_gain_compensation(gain_amt, tape_constants.noise_amount, tape_constants.crackle_amount);
+
+            let vol_mod = update_dropout_smoother(
+                is_broken,
+                &mut self.dropout_smoother,
+                &mut self.rng_seed,
+                sample_rate,
+            );
 
 
             // --- READ HEAD CALCULATION ---
@@ -412,96 +467,65 @@ impl Plugin for TapeDelay {
             // --- LEFT CHANNEL PROCESSING ---
             if let Some(sample_l) = samples.next() {
                 let input_l = *sample_l;
-
-                // 1. Read from "Tape"
                 let raw_delayed_l = linear_interpolate(&self.delay_buffer_l, read_pos);
 
-                // 2. Generate Dust/Noise
-                let noise = get_noise(&mut self.rng_seed) * compensated_noise_amt;
-                // 1. Get the Impulse (The single-sample spike)
-                // Pass the threshold we calculated earlier
-                let crackle_impulse = get_crackle(&mut self.rng_seed, crackle_threshold);
+                let (signal_to_record, output) = process_delay_channel(
+                    input_l,
+                    raw_delayed_l,
+                    &mut self.lp_state_l,
+                    &mut self.rng_seed,
+                    &mut self.crackle_integrator_l,
+                    tape_constants.current_tone_cutoff,
+                    tape_constants.crackle_threshold,
+                    compensated_noise_amt,
+                    compensated_crackle_amt,
+                    feedback_gain,
+                    vol_mod,
+                    gain_amt,
+                    makeup_gain,
+                    mix_amt,
+                );
 
-                // 2. Add Impulse to Integrator
-                // If impulse is 0.0, nothing changes. If it's 0.2, the value jumps up.
-                self.crackle_integrator_l += crackle_impulse;
-
-                // 3. Apply Decay (The "Body" of the sound)
-                // 0.9 means the click lasts about 20-40 samples (short click).
-                // 0.98 means it lasts ~200 samples (thumpier pop).
-                // Try 0.95 as a sweet spot.
-                self.crackle_integrator_l *= 0.95;
-
-                // 4. Use the INTEGRATOR as your audio signal, not the impulse
-                let crackle = self.crackle_integrator_l * compensated_crackle_amt;
-
-                // A. Tone Loss (Filtering)
-                // Simulates the high-frequency loss of magnetic tape
-                // Use current_tone_cutoff which changes based on mode
-                let filtered_feedback = one_pole_lp(raw_delayed_l, &mut self.lp_state_l, current_tone_cutoff);
-
-                // B. Summing
-                // Add input + filtered feedback + a little noise
-                let mut signal_to_record =
-                    input_l + (filtered_feedback * feedback_gain) + noise + crackle;
-
-                // --- APPLY WASTED EFFECTS ---
-                // We apply the dropout *before* saturation.
-                // This mimics the tape head losing contact with the magnetic medium.
-                // It effectively lowers the drive momentarily, cleaning up the sound while quieting it.
-                signal_to_record *= vol_mod;
-
-                // C. Tape Saturation (Soft Clipping)
-                // This is CRITICAL. It squashes the signal.
-                // If feedback > 100%, this keeps it from exceeding digital max (1.0).
-                signal_to_record = soft_clip(signal_to_record, gain_amt);
-
-                // 4. Write to "Tape" (Buffer)
                 if let Some(buf_val) = self.delay_buffer_l.get_mut(self.write_pos) {
                     *buf_val = signal_to_record;
                 }
 
-                // We apply makeup_gain ONLY to the wet signal here.
-                let wet_signal = raw_delayed_l * makeup_gain;
+                *sample_l = output;
 
-                // 5. Output Mix
-                // Usually on tape delays, the output is also saturated, or you blend the clean dry with saturated wet.
-                *sample_l = (input_l * (1.0 - mix_amt)) + (wet_signal * mix_amt);
-
-                // Capture Peak for Metering (Simple absolute value check)
                 let abs_l = sample_l.abs();
                 if abs_l > max_amplitude_in_block_l {
                     max_amplitude_in_block_l = abs_l;
                 }
             }
 
-            // --- RIGHT CHANNEL PROCESSING (Same logic) ---
+            // --- RIGHT CHANNEL PROCESSING ---
             if let Some(sample_r) = samples.next() {
                 let input_r = *sample_r;
                 let raw_delayed_r = linear_interpolate(&self.delay_buffer_r, read_pos);
-                let noise = get_noise(&mut self.rng_seed) * compensated_noise_amt;
-                let crackle_impulse = get_crackle(&mut self.rng_seed, crackle_threshold);
-                self.crackle_integrator_r += crackle_impulse;
-                self.crackle_integrator_r *= 0.95; // Same decay coefficient
 
-                let crackle = self.crackle_integrator_r * compensated_crackle_amt;
-
-                let filtered_feedback = one_pole_lp(raw_delayed_r, &mut self.lp_state_r, current_tone_cutoff);
-                let mut signal_to_record =
-                    input_r + (filtered_feedback * feedback_gain) + noise + crackle;
-
-                signal_to_record *= vol_mod;
-                signal_to_record = soft_clip(signal_to_record, gain_amt);
+                let (signal_to_record, output) = process_delay_channel(
+                    input_r,
+                    raw_delayed_r,
+                    &mut self.lp_state_r,
+                    &mut self.rng_seed,
+                    &mut self.crackle_integrator_r,
+                    tape_constants.current_tone_cutoff,
+                    tape_constants.crackle_threshold,
+                    compensated_noise_amt,
+                    compensated_crackle_amt,
+                    feedback_gain,
+                    vol_mod,
+                    gain_amt,
+                    makeup_gain,
+                    mix_amt,
+                );
 
                 if let Some(buf_val) = self.delay_buffer_r.get_mut(self.write_pos) {
                     *buf_val = signal_to_record;
                 }
 
-                let wet_signal = raw_delayed_r * makeup_gain;
+                *sample_r = output;
 
-                *sample_r = (input_r * (1.0 - mix_amt)) + (wet_signal * mix_amt);
-
-                // Capture Peak for Metering (Simple absolute value check)
                 let abs_r = sample_r.abs();
                 if abs_r > max_amplitude_in_block_r {
                     max_amplitude_in_block_r = abs_r;
@@ -512,44 +536,15 @@ impl Plugin for TapeDelay {
             self.write_pos = (self.write_pos + 1) % buffer_len;
         }
 
-        // --- UPDATE METER (Once per buffer, efficient and thread-safe) ---
-        if self.params.editor_state.is_open() {
-            // Calculate the decay for THIS specific block size.
-            // This makes the decay speed identical whether the buffer is 32 or 1024.
-            let block_size = buffer.samples() as f32;
-            let block_decay = f32::powf(self.meter_decay_per_sample, block_size);
-
-            // LEFT Meter
-            let current_peak_l = self.peak_meter_l.load(std::sync::atomic::Ordering::Relaxed);
-            let mut new_peak_l = if max_amplitude_in_block_l > current_peak_l {
-                max_amplitude_in_block_l // Attack is instant
-            } else {
-                // Decay
-                current_peak_l * block_decay
-            };
-            // SAFETY: If the value is tiny, just kill it so the GUI goes to 0
-            if new_peak_l < 0.001 {
-                new_peak_l = 0.0;
-            }
-            self.peak_meter_l
-                .store(new_peak_l, std::sync::atomic::Ordering::Relaxed);
-
-            // RIGHT Meter
-            let current_peak_r = self.peak_meter_r.load(std::sync::atomic::Ordering::Relaxed);
-            let mut new_peak_r = if max_amplitude_in_block_r > current_peak_r {
-                max_amplitude_in_block_r // Attack is instant
-            } else {
-                // Decay
-                current_peak_r * block_decay
-
-            };
-            // SAFETY: If the value is tiny, just kill it so the GUI goes to 0
-            if new_peak_r < 0.001 {
-                new_peak_r = 0.0;
-            }
-            self.peak_meter_r
-                .store(new_peak_r, std::sync::atomic::Ordering::Relaxed);
-        }
+        update_peak_meters(
+            self.params.editor_state.is_open(),
+            buffer.samples() as f32,
+            self.meter_decay_per_sample,
+            &self.peak_meter_l,
+            &self.peak_meter_r,
+            max_amplitude_in_block_l,
+            max_amplitude_in_block_r,
+        );
 
         ProcessStatus::Normal
     }
@@ -631,6 +626,213 @@ fn get_crackle(seed: &mut u32, threshold: f32) -> f32 {
     }
 
     0.0
+}
+
+// --- HELPER FUNCTIONS FOR PROCESS LOOP ---
+
+#[inline]
+fn calculate_tape_constants(sample_rate: f32, is_broken: bool) -> TapeConstants {
+    let flutter_rate = 2.0 * std::f32::consts::PI * (1.5 / sample_rate);
+    let noise_amount = 0.005;
+    let crackle_amount = 0.15;
+    let current_tone_cutoff = if is_broken { 0.25 } else { 0.5 };
+    let target_crackle_hz = 3.0;
+    let probability_crackle = target_crackle_hz / sample_rate;
+    let crackle_threshold = 1.0 - probability_crackle;
+
+    TapeConstants {
+        flutter_rate,
+        noise_amount,
+        crackle_amount,
+        current_tone_cutoff,
+        crackle_threshold,
+    }
+}
+
+struct TapeConstants {
+    flutter_rate: f32,
+    noise_amount: f32,
+    crackle_amount: f32,
+    current_tone_cutoff: f32,
+    crackle_threshold: f32,
+}
+
+#[inline]
+fn update_lfo_phase(lfo_phase: &mut f32, flutter_rate: f32) {
+    *lfo_phase += flutter_rate;
+    if *lfo_phase > 2.0 * std::f32::consts::PI {
+        *lfo_phase -= 2.0 * std::f32::consts::PI;
+    }
+}
+
+#[inline]
+fn calculate_gain_compensation(gain_amt: f32, noise_amount: f32, crackle_amount: f32) -> (f32, f32, f32) {
+    let makeup_gain = 1.0 / gain_amt.powf(0.35);
+    let compensation_factor = gain_amt * makeup_gain;
+    let compensated_noise_amt = noise_amount / compensation_factor;
+    let compensated_crackle_amt = crackle_amount / compensation_factor;
+    (makeup_gain, compensated_noise_amt, compensated_crackle_amt)
+}
+
+#[inline]
+fn update_dropout_smoother(
+    is_broken: bool,
+    dropout_smoother: &mut f32,
+    rng_seed: &mut u32,
+    sample_rate: f32,
+) -> f32 {
+    if is_broken {
+        let rand_val = get_noise(rng_seed).abs();
+
+        // At 44100 Hz: 100ms decay time = 4410 samples
+        let smooth_speed = 1.0 - f32::exp(-1.0 / (0.100 * sample_rate));
+
+        // At 44100 Hz:
+        // - rand_val > 0.999997: ~0.13 dropouts per second (full mute)
+        // - rand_val > 0.9998: ~8.82 volume dips per second (40% volume)
+        // - else: full health (100% volume)
+        let target_health = if rand_val > 0.999997 {
+            0.0
+        } else if rand_val > 0.9998 {
+            0.4
+        } else {
+            1.0
+        };
+
+        // At 44100 Hz: dropout decay = 5ms (220.5 samples), recovery = 100ms (4410 samples)
+        let coeff = if target_health < *dropout_smoother {
+            smooth_speed * 10.0
+        } else {
+            smooth_speed
+        };
+        *dropout_smoother += (target_health - *dropout_smoother) * coeff;
+        *dropout_smoother
+    } else {
+        *dropout_smoother = 1.0;
+        1.0
+    }
+}
+
+#[inline]
+fn generate_tape_noise_and_crackle(
+    rng_seed: &mut u32,
+    crackle_integrator: &mut f32,
+    crackle_threshold: f32,
+    compensated_noise_amt: f32,
+    compensated_crackle_amt: f32,
+) -> (f32, f32) {
+    let noise = get_noise(rng_seed) * compensated_noise_amt;
+    let crackle_impulse = get_crackle(rng_seed, crackle_threshold);
+    *crackle_integrator += crackle_impulse;
+    *crackle_integrator *= 0.95;
+    let crackle = *crackle_integrator * compensated_crackle_amt;
+    (noise, crackle)
+}
+
+#[inline]
+fn process_direct_distortion_channel(
+    input: f32,
+    lp_state: &mut f32,
+    rng_seed: &mut u32,
+    crackle_integrator: &mut f32,
+    tone_cutoff: f32,
+    crackle_threshold: f32,
+    compensated_noise_amt: f32,
+    compensated_crackle_amt: f32,
+    vol_mod: f32,
+    gain_amt: f32,
+    makeup_gain: f32,
+) -> f32 {
+    let (noise, crackle) = generate_tape_noise_and_crackle(
+        rng_seed,
+        crackle_integrator,
+        crackle_threshold,
+        compensated_noise_amt,
+        compensated_crackle_amt,
+    );
+
+    let filtered_input = one_pole_lp(input, lp_state, tone_cutoff);
+    let mut signal = filtered_input + noise + crackle;
+    signal *= vol_mod;
+    signal = soft_clip(signal, gain_amt);
+    signal * makeup_gain
+}
+
+#[inline]
+fn process_delay_channel(
+    input: f32,
+    raw_delayed: f32,
+    lp_state: &mut f32,
+    rng_seed: &mut u32,
+    crackle_integrator: &mut f32,
+    tone_cutoff: f32,
+    crackle_threshold: f32,
+    compensated_noise_amt: f32,
+    compensated_crackle_amt: f32,
+    feedback_gain: f32,
+    vol_mod: f32,
+    gain_amt: f32,
+    makeup_gain: f32,
+    mix_amt: f32,
+) -> (f32, f32) {
+    let (noise, crackle) = generate_tape_noise_and_crackle(
+        rng_seed,
+        crackle_integrator,
+        crackle_threshold,
+        compensated_noise_amt,
+        compensated_crackle_amt,
+    );
+
+    let filtered_feedback = one_pole_lp(raw_delayed, lp_state, tone_cutoff);
+    let mut signal_to_record = input + (filtered_feedback * feedback_gain) + noise + crackle;
+    signal_to_record *= vol_mod;
+    signal_to_record = soft_clip(signal_to_record, gain_amt);
+
+    let wet_signal = raw_delayed * makeup_gain;
+    let output = (input * (1.0 - mix_amt)) + (wet_signal * mix_amt);
+
+    (signal_to_record, output)
+}
+
+#[inline]
+fn update_peak_meters(
+    editor_open: bool,
+    buffer_samples: f32,
+    meter_decay_per_sample: f32,
+    peak_meter_l: &Arc<AtomicF32>,
+    peak_meter_r: &Arc<AtomicF32>,
+    max_amplitude_l: f32,
+    max_amplitude_r: f32,
+) {
+    if !editor_open {
+        return;
+    }
+
+    let block_decay = f32::powf(meter_decay_per_sample, buffer_samples);
+
+    // Update left meter
+    let current_peak_l = peak_meter_l.load(Ordering::Relaxed);
+    let mut new_peak_l = if max_amplitude_l > current_peak_l {
+        max_amplitude_l
+    } else {
+        current_peak_l * block_decay
+    };
+    if new_peak_l < 0.001 {
+        new_peak_l = 0.0;
+    }
+    peak_meter_l.store(new_peak_l, Ordering::Relaxed);
+
+    // Update right meter
+    let current_peak_r = peak_meter_r.load(Ordering::Relaxed);
+    let mut new_peak_r = if max_amplitude_r > current_peak_r {
+        max_amplitude_r
+    } else {
+        current_peak_r * block_decay
+    };
+    if new_peak_r < 0.001 {
+        new_peak_r = 0.0;
+    }
+    peak_meter_r.store(new_peak_r, Ordering::Relaxed);
 }
 
 impl Vst3Plugin for TapeDelay {

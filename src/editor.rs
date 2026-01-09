@@ -67,9 +67,11 @@ pub(crate) fn create(
         .build(cx);
 
         VStack::new(cx, |cx| {
-            HStack::new(cx, |cx| {
+            VStack::new(cx, |cx| {
                 Label::new(cx, "CONVOLUTION'S TAPE DELAY").class("header-title");
+                Label::new(cx, "v0.1.0").class("header-version-title");
             })
+            .row_between(Pixels(10.0))
             .child_space(Stretch(1.0))
             .class("title-section");
 
@@ -114,6 +116,13 @@ pub(crate) fn create(
                     .child_left(Stretch(1.0))
                     .child_right(Stretch(1.0))
                     .class("sync-button");
+
+                ParamButton::new(cx, Data::tape_data, |params| &params.distortion_mode)
+                    .width(Stretch(0.6))
+                    .height(Stretch(0.6))
+                    .child_left(Stretch(1.0))
+                    .child_right(Stretch(1.0))
+                    .class("distortion-button");
             })
             .width(Stretch(0.8))
             .height(Stretch(0.2))
@@ -128,17 +137,20 @@ pub(crate) fn create(
                 .class("portion");
                 VStack::new(cx, |cx| {
                     ParamKnob::new(cx, Data::tape_data, |params| &params.delay_time_ms, false)
-                        .width(Stretch(1.0));
+                        .width(Stretch(1.0))
+                        .disabled(Data::tape_data.map(|params| params.distortion_mode.value()));
                 })
                 .class("portion");
                 VStack::new(cx, |cx| {
                     ParamKnob::new(cx, Data::tape_data, |params| &params.feedback, false)
-                        .width(Stretch(1.0));
+                        .width(Stretch(1.0))
+                        .disabled(Data::tape_data.map(|params| params.distortion_mode.value()));
                 })
                 .class("portion");
                 VStack::new(cx, |cx| {
                     ParamKnob::new(cx, Data::tape_data, |params| &params.mix, false)
-                        .width(Stretch(1.0));
+                        .width(Stretch(1.0))
+                        .disabled(Data::tape_data.map(|params| params.distortion_mode.value()));
                 })
                 .class("portion");
             })
