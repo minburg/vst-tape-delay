@@ -740,7 +740,7 @@ fn calculate_tape_constants(sample_rate: f32, is_broken: bool) -> TapeConstants 
     let flutter_rate = 2.0 * std::f32::consts::PI * (1.5 / sample_rate);
     let noise_amount = 0.005;
     let crackle_amount = 0.15;
-    let current_tone_cutoff = if is_broken { 0.25 } else { 0.5 };
+    let current_tone_cutoff = if is_broken { 0.35 } else { 0.95 };
     let target_crackle_hz = 3.0;
     let probability_crackle = target_crackle_hz / sample_rate;
     let crackle_threshold = 1.0 - probability_crackle;
@@ -890,11 +890,12 @@ fn process_direct_distortion_channel(
         compensated_crackle_amt,
     );
 
-    let filtered_input = one_pole_lp(input, lp_state, tone_cutoff);
-    let mut signal = filtered_input + noise + crackle;
+    let mut signal = input + noise + crackle;
     signal *= vol_mod;
     signal = soft_clip(signal, gain_amt);
-    signal * makeup_gain
+
+    let filtered_output = one_pole_lp(signal, lp_state, tone_cutoff);
+    filtered_output * makeup_gain
 }
 
 #[inline]
