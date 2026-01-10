@@ -61,8 +61,11 @@ pub struct TapeDelay {
     peak_meter_l: Arc<AtomicF32>,
     peak_meter_r: Arc<AtomicF32>,
 
-    crackle_integrator_l: f32, // New state for Left
-    crackle_integrator_r: f32, // New state for Right
+    crackle_integrator_l: f32,
+    crackle_integrator_r: f32,
+    crackle_hp_l: f32,
+    crackle_hp_r: f32,
+    was_distortion_mode: bool,
 }
 
 #[derive(Params)]
@@ -88,6 +91,7 @@ struct TapeParams {
     pub feedback: FloatParam,
     #[id = "mix"]
     pub mix: FloatParam,
+    pub ghost_zero: FloatParam,
     #[id = "noise"]
     pub noise: FloatParam,
     #[id = "crackle"]
@@ -158,7 +162,7 @@ impl Default for TapeParams {
                 }
             })),
 
-            time_sync: BoolParam::new("Time Sync", false).with_callback(Arc::new(move |value| {
+            time_sync: BoolParam::new("Time Sync", true).with_callback(Arc::new(move |value| {
                 // When user clicks button, update the flag!
                 time_sync_flag_for_callback.store(value, Ordering::Relaxed);
             })),
@@ -195,6 +199,9 @@ impl Default for TapeParams {
                     }
                 }))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
+
+            ghost_zero: FloatParam::new("😎", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_value_to_string(Arc::new(|_| String::from("0.0"))).hide().hide_in_generic_ui(),
 
             noise: FloatParam::new(
                 "Noise",
@@ -256,6 +263,9 @@ impl Default for TapeDelay {
             peak_meter_r: Arc::new(AtomicF32::new(0.0)),
             crackle_integrator_l: 0.0,
             crackle_integrator_r: 0.0,
+            crackle_hp_l: 0.0,
+            crackle_hp_r: 0.0,
+            was_distortion_mode: false,
         }
     }
 }
@@ -319,8 +329,21 @@ impl Plugin for TapeDelay {
         let sample_rate = self.sample_rate;
         let buffer_len = self.delay_buffer_l.len();
 
-        // Check if we're in distortion mode
+        // 1. Get Current State
         let is_distortion_mode = self.params.distortion_mode.value();
+
+        // 2. EDGE DETECTION: Check if we just switched OFF distortion mode
+        if self.was_distortion_mode && !is_distortion_mode {
+            // Clear the buffers to remove old "ghost" echoes
+            self.delay_buffer_l.fill(0.0);
+            self.delay_buffer_r.fill(0.0);
+
+            // Optional: Reset write head to avoid clicking (optional, but cleaner)
+            // self.write_pos = 0;
+        }
+
+        // 3. Update the state tracker for the NEXT block
+        self.was_distortion_mode = is_distortion_mode;
 
         // --- DISTORTION MODE: Direct Signal Path ---
         if is_distortion_mode {
@@ -336,7 +359,7 @@ impl Plugin for TapeDelay {
                 let gain_amt = self.params.gain.smoothed.next();
                 let noise_amt = self.params.noise.smoothed.next();
                 let crackle_amt = self.params.crackle.smoothed.next();
-                let (makeup_gain, compensated_noise_amt, compensated_crackle_amt) =
+                let (makeup_gain, compensated_noise_amt, compensated_crackle_amt ) =
                     calculate_gain_compensation(
                         gain_amt,
                         tape_constants.noise_amount,
@@ -362,6 +385,7 @@ impl Plugin for TapeDelay {
                         &mut self.lp_state_l,
                         &mut self.rng_seed,
                         &mut self.crackle_integrator_l,
+                        &mut self.crackle_hp_l,
                         tape_constants.current_tone_cutoff,
                         tape_constants.crackle_threshold,
                         compensated_noise_amt,
@@ -384,6 +408,7 @@ impl Plugin for TapeDelay {
                         &mut self.lp_state_r,
                         &mut self.rng_seed,
                         &mut self.crackle_integrator_r,
+                        &mut self.crackle_hp_r,
                         tape_constants.current_tone_cutoff,
                         tape_constants.crackle_threshold,
                         compensated_noise_amt,
@@ -553,6 +578,7 @@ impl Plugin for TapeDelay {
                     &mut self.lp_state_l,
                     &mut self.rng_seed,
                     &mut self.crackle_integrator_l,
+                    &mut self.crackle_hp_l,
                     cutoff_l,
                     tape_constants.crackle_threshold,
                     compensated_noise_amt,
@@ -587,6 +613,7 @@ impl Plugin for TapeDelay {
                     &mut self.lp_state_r,
                     &mut self.rng_seed,
                     &mut self.crackle_integrator_r,
+                    &mut self.crackle_hp_r,
                     cutoff_r,
                     tape_constants.crackle_threshold,
                     compensated_noise_amt,
@@ -751,7 +778,7 @@ fn calculate_gain_compensation(
     noise_volume: f32,
     crackle_volume: f32,
 ) -> (f32, f32, f32) {
-    let makeup_gain = 1.0 / gain_amt.powf(0.35);
+    let makeup_gain = 1.0 / gain_amt.powf(0.40);
     let compensation_factor = gain_amt * makeup_gain;
     let compensated_noise_amt = noise_amount / compensation_factor;
     let compensated_crackle_amt = crackle_amount / compensation_factor;
@@ -787,8 +814,8 @@ fn update_dropout_smoother(
         };
 
         // 3. ASYMMETRIC SMOOTHING (The "Shedding" feel)
-        // Recovery (0.200) = 200ms. Slow recovery is key to hearing it!
-        let recovery_speed = 1.0 - f32::exp(-1.0 / (0.200 * sample_rate));
+        // Recovery (0.80) = 80ms. Slow recovery is key to hearing it!
+        let recovery_speed = 1.0 - f32::exp(-1.0 / (0.80 * sample_rate));
 
         let coeff = if target_health < *dropout_smoother {
             recovery_speed * 15.0 // Fast drop (snappy)
@@ -808,16 +835,34 @@ fn update_dropout_smoother(
 #[inline]
 fn generate_tape_noise_and_crackle(
     rng_seed: &mut u32,
-    crackle_integrator: &mut f32,
+    crackle_integrator: &mut f32, // This is your "Low Frequency" state
+    crackle_hp: &mut f32,  // NEW: Adds a "High Pass" state to create a Bandpass
     crackle_threshold: f32,
     compensated_noise_amt: f32,
     compensated_crackle_amt: f32,
 ) -> (f32, f32) {
     let noise = get_noise(rng_seed) * compensated_noise_amt;
     let crackle_impulse = get_crackle(rng_seed, crackle_threshold);
+
+    // 1. THE BODY (Low Pass)
+    // 0.99 = Deep, heavy thud.
+    // 0.95 = Lighter tap.
     *crackle_integrator += crackle_impulse;
-    *crackle_integrator *= 0.95;
-    let crackle = *crackle_integrator * compensated_crackle_amt;
+    *crackle_integrator *= 0.99;
+
+    // 2. THE TIGHTNESS (High Pass / DC Blocker)
+    // 0.9 = Tight, punchy kick drum sound.
+    // 0.99 = Loose, rumbly sub-bass.
+    // 0.8 = Thin, wooden knock.
+    let hp_coeff = 0.9;
+
+    // This removes the "infinite rumble" (DC offset) and creates the punch
+    let input = *crackle_integrator;
+    let output = input - *crackle_hp;
+    *crackle_hp = input * (1.0 - hp_coeff) + *crackle_hp * hp_coeff;
+
+    // Apply volume
+    let crackle = output * compensated_crackle_amt;
     (noise, crackle)
 }
 
@@ -827,6 +872,7 @@ fn process_direct_distortion_channel(
     lp_state: &mut f32,
     rng_seed: &mut u32,
     crackle_integrator: &mut f32,
+    crackle_hp: &mut f32,
     tone_cutoff: f32,
     crackle_threshold: f32,
     compensated_noise_amt: f32,
@@ -838,6 +884,7 @@ fn process_direct_distortion_channel(
     let (noise, crackle) = generate_tape_noise_and_crackle(
         rng_seed,
         crackle_integrator,
+        crackle_hp,
         crackle_threshold,
         compensated_noise_amt,
         compensated_crackle_amt,
@@ -857,6 +904,7 @@ fn process_delay_channel(
     lp_state: &mut f32,
     rng_seed: &mut u32,
     crackle_integrator: &mut f32,
+    crackle_hp: &mut f32,
     tone_cutoff: f32,
     crackle_threshold: f32,
     compensated_noise_amt: f32,
@@ -870,6 +918,7 @@ fn process_delay_channel(
     let (noise, crackle) = generate_tape_noise_and_crackle(
         rng_seed,
         crackle_integrator,
+        crackle_hp,
         crackle_threshold,
         compensated_noise_amt,
         compensated_crackle_amt,

@@ -162,21 +162,72 @@ pub(crate) fn create(
                 })
                 .class("portion");
                 VStack::new(cx, |cx| {
-                    ParamKnob::new(cx, Data::tape_data, |params| &params.delay_time_ms, false)
-                        .width(Stretch(1.0))
-                        .disabled(Data::tape_data.map(|params| params.distortion_mode.value()));
+                    // Create a Binding to listen to the Distortion Mode boolean
+                    Binding::new(cx, Data::tape_data.map(|p| p.distortion_mode.value()), |cx, is_dist_lens| {
+
+                        // Use .get(cx) to read the boolean value
+                        if is_dist_lens.get(cx) {
+                            // --- MODE ON: SHOW GHOST KNOB ---
+                            // This knob is bound to 'ghost_zero', so it sits at 0.0.
+                            // We disable it so the user can't turn it.
+                            ParamKnob::new(cx, Data::tape_data, |params| &params.ghost_zero, false)
+                                .width(Stretch(1.0))
+                                .disabled(true) // Grayed out
+                                .class("portion"); // Apply same CSS class for consistent layout
+                        } else {
+                            // --- MODE OFF: SHOW REAL KNOB ---
+                            // This is your original knob bound to 'mix'.
+                            // It remembers its position (e.g. 30%).
+                            ParamKnob::new(cx, Data::tape_data, |params| &params.delay_time_ms, false)
+                                .width(Stretch(1.0));
+                        }
+                    });
                 })
                 .class("portion");
                 VStack::new(cx, |cx| {
-                    ParamKnob::new(cx, Data::tape_data, |params| &params.feedback, false)
-                        .width(Stretch(1.0))
-                        .disabled(Data::tape_data.map(|params| params.distortion_mode.value()));
+                    // Create a Binding to listen to the Distortion Mode boolean
+                    Binding::new(cx, Data::tape_data.map(|p| p.distortion_mode.value()), |cx, is_dist_lens| {
+
+                        // Use .get(cx) to read the boolean value
+                        if is_dist_lens.get(cx) {
+                            // --- MODE ON: SHOW GHOST KNOB ---
+                            // This knob is bound to 'ghost_zero', so it sits at 0.0.
+                            // We disable it so the user can't turn it.
+                            ParamKnob::new(cx, Data::tape_data, |params| &params.ghost_zero, false)
+                                .width(Stretch(1.0))
+                                .disabled(true) // Grayed out
+                                .class("portion"); // Apply same CSS class for consistent layout
+                        } else {
+                            // --- MODE OFF: SHOW REAL KNOB ---
+                            // This is your original knob bound to 'mix'.
+                            // It remembers its position (e.g. 30%).
+                            ParamKnob::new(cx, Data::tape_data, |params| &params.feedback, false)
+                                .width(Stretch(1.0));
+                        }
+                    });
                 })
                 .class("portion");
                 VStack::new(cx, |cx| {
-                    ParamKnob::new(cx, Data::tape_data, |params| &params.mix, false)
-                        .width(Stretch(1.0))
-                        .disabled(Data::tape_data.map(|params| params.distortion_mode.value()));
+                    // Create a Binding to listen to the Distortion Mode boolean
+                    Binding::new(cx, Data::tape_data.map(|p| p.distortion_mode.value()), |cx, is_dist_lens| {
+
+                        // Use .get(cx) to read the boolean value
+                        if is_dist_lens.get(cx) {
+                            // --- MODE ON: SHOW GHOST KNOB ---
+                            // This knob is bound to 'ghost_zero', so it sits at 0.0.
+                            // We disable it so the user can't turn it.
+                            ParamKnob::new(cx, Data::tape_data, |params| &params.ghost_zero, false)
+                                .width(Stretch(1.0))
+                                .disabled(true) // Grayed out
+                                .class("portion"); // Apply same CSS class for consistent layout
+                        } else {
+                            // --- MODE OFF: SHOW REAL KNOB ---
+                            // This is your original knob bound to 'mix'.
+                            // It remembers its position (e.g. 30%).
+                            ParamKnob::new(cx, Data::tape_data, |params| &params.mix, false)
+                                .width(Stretch(1.0));
+                        }
+                    });
                 })
                 .class("portion");
             })
