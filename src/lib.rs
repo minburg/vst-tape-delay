@@ -77,9 +77,7 @@ struct TapeParams {
     pub gain: FloatParam,
     #[id = "time"]
     pub delay_time_ms: FloatParam,
-    // Shared flag: Formatter reads this, Sync param updates this.
-    // We skip serializing this because it's just a helper for the GUI text.
-    #[persist = "ignore"]
+    #[persist = "time_sync_state"]
     pub is_sync_active: Arc<AtomicBool>,
     #[id = "time_sync"]
     pub time_sync: BoolParam,
@@ -102,8 +100,8 @@ struct TapeParams {
 
 impl Default for TapeParams {
     fn default() -> Self {
-        // Create the shared memory flag
-        let is_time_sync_active = Arc::new(AtomicBool::new(false));
+        let sync_default = true;
+        let is_time_sync_active = Arc::new(AtomicBool::new(sync_default));
 
         // Clone it for the closure
         let time_sync_flag_for_formatter = is_time_sync_active.clone();
@@ -139,33 +137,29 @@ impl Default for TapeParams {
             delay_time_ms: FloatParam::new(
                 "Time",
                 200.0,
-                FloatRange::Linear {
-                    min: TIME_MS_MIN,
-                    max: TIME_MS_MAX,
-                },
+                FloatRange::Linear { min: TIME_MS_MIN, max: TIME_MS_MAX },
             )
-            .with_smoother(SmoothingStyle::Linear(15.0))
-            .with_value_to_string(Arc::new(move |value| {
-                // Check the flag
-                if time_sync_flag_for_formatter.load(Ordering::Relaxed) {
-                    // --- SYNC MODE DISPLAY ---
-                    // Map 1.0-1000.0 back to 0-15 index
-                    let normalized = (value - TIME_MS_MIN) / (TIME_MS_MAX - TIME_MS_MIN);
-                    let step_index = (normalized * 17.99).floor() as i32;
+                .with_smoother(SmoothingStyle::Linear(15.0))
+                .with_value_to_string(Arc::new(move |value| {
+                    // BUG FIX: Instead of checking the atomic flag, we need to know
+                    // if we are in sync mode. But the formatter closure only gives us the 'value'.
 
-                    // Get the label (e.g., "1/8 .")
-                    let (_, label) = get_beat_info(step_index);
-                    label.to_string()
-                } else {
-                    // --- FREE MODE DISPLAY ---
-                    format!("{:.1} ms", value)
-                }
-            })),
+                    // To fix this globally, we check the atomic, but we must ensure
+                    // the atomic is initialized correctly from the PERSISTED state.
+                    if time_sync_flag_for_formatter.load(Ordering::Relaxed) {
+                        let normalized = (value - TIME_MS_MIN) / (TIME_MS_MAX - TIME_MS_MIN);
+                        let step_index = (normalized * 17.99).floor() as i32;
+                        let (_, label) = get_beat_info(step_index);
+                        label.to_string()
+                    } else {
+                        format!("{:.1} ms", value)
+                    }
+                })),
 
-            time_sync: BoolParam::new("Time Sync", true).with_callback(Arc::new(move |value| {
-                // When user clicks button, update the flag!
-                time_sync_flag_for_callback.store(value, Ordering::Relaxed);
-            })),
+            time_sync: BoolParam::new("Time Sync", sync_default)
+                .with_callback(Arc::new(move |value| {
+                    time_sync_flag_for_callback.store(value, Ordering::Relaxed);
+                })),
             broken_tape: BoolParam::new("Broken", false).with_callback(Arc::new(move |value| {
                 // When user clicks button, update the flag!
                 tape_broken_flag_for_callback.store(value, Ordering::Relaxed);
@@ -740,7 +734,7 @@ fn calculate_tape_constants(sample_rate: f32, is_broken: bool) -> TapeConstants 
     let flutter_rate = 2.0 * std::f32::consts::PI * (1.5 / sample_rate);
     let noise_amount = 0.005;
     let crackle_amount = 0.15;
-    let current_tone_cutoff = if is_broken { 0.35 } else { 0.95 };
+    let current_tone_cutoff = if is_broken { 0.45 } else { 0.85 };
     let target_crackle_hz = 3.0;
     let probability_crackle = target_crackle_hz / sample_rate;
     let crackle_threshold = 1.0 - probability_crackle;
@@ -778,7 +772,7 @@ fn calculate_gain_compensation(
     noise_volume: f32,
     crackle_volume: f32,
 ) -> (f32, f32, f32) {
-    let makeup_gain = 1.0 / gain_amt.powf(0.40);
+    let makeup_gain = 1.0 / gain_amt.powf(0.60);
     let compensation_factor = gain_amt * makeup_gain;
     let compensated_noise_amt = noise_amount / compensation_factor;
     let compensated_crackle_amt = crackle_amount / compensation_factor;
@@ -791,7 +785,7 @@ fn calculate_gain_compensation(
 fn update_dropout_smoother(
     is_broken: bool,
     dropout_smoother: &mut f32,
-    dropout_timer: &mut f32, // <--- New state variable
+    dropout_timer: &mut f32,
     rng_seed: &mut u32,
     sample_rate: f32,
 ) -> f32 {
@@ -799,31 +793,39 @@ fn update_dropout_smoother(
         let rand_val = get_noise(rng_seed).abs();
 
         // 1. CHANCE TO TRIGGER
-        // Threshold 0.9999: Approx once every 2.2 seconds at 44.1k
-        if rand_val > 0.9999 && *dropout_timer <= 0.0 {
-            // Randomly decide how long the dropout lasts (50ms to 150ms)
-            *dropout_timer = (0.050 + (rand_val * 0.100)) * sample_rate;
+        // 0.9999 is okay, but if it's too frequent, try 0.99995
+        if rand_val > 0.99995 && *dropout_timer <= 0.0 {
+            // REDUCED DURATION: Stay at 0.3 for only 5ms to 20ms
+            // This is a "micro-dropout"
+            *dropout_timer = (0.005 + (rand_val * 0.015)) * sample_rate;
         }
 
         // 2. DETERMINE TARGET
         let target_health = if *dropout_timer > 0.0 {
-            *dropout_timer -= 1.0; // Countdown
-            0.0 // Hard dropout
+            *dropout_timer -= 1.0;
+            0.3
         } else {
-            1.0 // Healthy
+            1.0
         };
 
-        // 3. ASYMMETRIC SMOOTHING (The "Shedding" feel)
-        // Recovery (0.80) = 80ms. Slow recovery is key to hearing it!
-        let recovery_speed = 1.0 - f32::exp(-1.0 / (0.80 * sample_rate));
+        // 3. REFINED SMOOTHING SPEEDS
+        // Base recovery time: 30ms (0.030) - much snappier than 800ms!
+        let recovery_speed = 1.0 - f32::exp(-1.0 / (0.030 * sample_rate));
 
         let coeff = if target_health < *dropout_smoother {
-            recovery_speed * 15.0 // Fast drop (snappy)
+            // ATTACK: 40x faster than recovery (approx 0.7ms)
+            // This makes the "dip" feel like a real mechanical glitch
+            recovery_speed * 40.0
         } else {
-            recovery_speed // Slow fade back in
+            // RELEASE: The 30ms recovery
+            recovery_speed
         };
 
         *dropout_smoother += (target_health - *dropout_smoother) * coeff;
+
+        // Safety clamp to prevent overshoot
+        *dropout_smoother = dropout_smoother.clamp(0.0, 1.0);
+
         *dropout_smoother
     } else {
         *dropout_smoother = 1.0;
