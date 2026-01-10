@@ -275,7 +275,7 @@ impl Plugin for TapeDelay {
     const VENDOR: &'static str = "Convolution DEV";
     const URL: &'static str = "https://youtu.be/dQw4w9WgXcQ";
     const EMAIL: &'static str = "email@example.com";
-    const VERSION: &'static str = "0.1.1";
+    const VERSION: &'static str = "0.1.2";
 
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
         main_input_channels: NonZeroU32::new(2),

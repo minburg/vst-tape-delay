@@ -15,6 +15,16 @@
     child-bottom: 20px;
 }
 
+.link-section {
+    /*background-color: rgba(109, 44, 213, 0.78);*/
+
+    width: 1s;
+    col-between: 40px;
+    /* This adds padding to the far left and far right of the whole row */
+    child-left: 100px;
+    child-right: 100px;
+}
+
 .meter-section {
     background-color: rgba(40, 12, 85, 0);
     /*child-space: 50px;*/
@@ -202,4 +212,37 @@
     border-radius: 8px;
     border-width: 2px;
     border-color: rgba(126, 126, 126, 1.0);
+}
+
+.update-link {
+    /* Make it look clickable */
+    cursor: pointer;
+    color: #d28819;
+    font-size: 20.0;
+    font-weight: bold;
+    font-family: "Comfortaa";
+}
+
+.update-link:hover {
+    background-color: #512540;
+}
+
+.update-link:active {
+    color: #ffffff; /* Flash white when clicked */
+}
+
+.insta-button {
+    background-image: url("insta.png");
+    background-size: cover;
+    width: 35px;
+    height: 35px;
+    cursor: pointer;
+}
+
+.spotify-button {
+    background-image: url("spotify.png");
+    background-size: cover;
+    width: 35px;
+    height: 35px;
+    cursor: pointer;
 }

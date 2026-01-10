@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::editor::my_peak_meter::MyPeakMeter;
 use crate::TapeParams;
-use image::load_from_memory;
+use nih_plug_vizia::vizia::image::load_from_memory;
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::{create_vizia_editor, ViziaState, ViziaTheming};
 
@@ -26,6 +26,8 @@ pub const COMFORTAA_LIGHT_TTF: &[u8] = include_bytes!("./resource/Comfortaa-Ligh
 pub const COMFORTAA: &str = "Comfortaa";
 
 const BG_IMAGE_BYTES: &[u8] = include_bytes!("./resource/ghost.png");
+const INSTA_ICON_BYTES: &[u8] = include_bytes!("./resource/Instagram_icon_2.png");
+const SPOTIFY_ICON_BYTES: &[u8] = include_bytes!("./resource/Spotify_logo_2.png");
 
 #[derive(Lens)]
 struct Data {
@@ -58,6 +60,16 @@ pub(crate) fn create(
             Err(e) => nih_error!("Failed to load image: {}", e),
         }
 
+        match load_from_memory(INSTA_ICON_BYTES) {
+            Ok(img) => cx.load_image("insta.png", img, ImageRetentionPolicy::Forever),
+            Err(e) => nih_error!("Failed to load image: {}", e),
+        }
+
+        match load_from_memory(SPOTIFY_ICON_BYTES) {
+            Ok(img) => cx.load_image("spotify.png", img, ImageRetentionPolicy::Forever),
+            Err(e) => nih_error!("Failed to load image: {}", e),
+        }
+
         if let Err(e) = cx.add_stylesheet(include_style!("/src/resource/style.css")) {
             nih_log!("CSS Error: {:?}", e);
         }
@@ -72,7 +84,33 @@ pub(crate) fn create(
         VStack::new(cx, |cx| {
             VStack::new(cx, |cx| {
                 Label::new(cx, "CONVOLUTION'S TAPE DELAY").class("header-title");
-                Label::new(cx, "v0.1.1").class("header-version-title");
+                HStack::new(cx, |cx| {
+                    Label::new(cx, "Check for Updates")
+                        .class("update-link")
+                        .on_press(|_| {
+                            if let Err(e) = webbrowser::open("https://github.com/minburg/vst-tape-delay/releases") {
+                                nih_log!("Failed to open browser: {}", e);
+                            }
+                        });
+                    Label::new(cx, "v0.1.2").class("header-version-title");
+                    Element::new(cx)
+                        .class("insta-button")
+                        .on_press(|_| {
+                            let _ = webbrowser::open("https://www.instagram.com/convolution.official/");
+                        });
+                    Element::new(cx)
+                        .class("spotify-button").opacity(0.5)
+                        .on_press(|_| {
+                            let _ = webbrowser::open("https://open.spotify.com/artist/7k0eMwQbplT3Zyyy0DalRL?si=aalp-7GQQ2O_cZRodAlsNg");
+                        });
+
+                })
+                    .width(Stretch(1.0))
+                    .child_space(Stretch(1.0))
+                    .child_top(Stretch(0.01))
+                    .child_bottom(Stretch(0.01))
+                    .class("link-section");
+
             })
             .row_between(Pixels(10.0))
             .child_space(Stretch(1.0))

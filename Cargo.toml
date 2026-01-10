@@ -1,6 +1,6 @@
 [package]
 name = "tape_delay"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Marinus Burger <convolution_official@protonmail.com>"]
 license = "GPL-3.0-or-later"
@@ -13,8 +13,8 @@ crate-type = ["cdylib", "lib"]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["standalone", "vst3"] }
 nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 parking_lot = "0.12.5"
-rand = "0.8.5"
-image = "0.24"
+rand = "0.10.0-rc.6"
+webbrowser = "1.0"
 
 [patch."https://github.com/RustAudio/baseview.git"]
 baseview = { path = "./baseview-master" }
