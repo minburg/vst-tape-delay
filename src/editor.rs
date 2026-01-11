@@ -8,7 +8,7 @@ use nih_plug::prelude::{util, Editor};
 use nih_plug_vizia::assets::register_noto_sans_light;
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::widgets::ResizeHandle;
-use nih_plug_vizia::widgets::{RawParamEvent};
+use nih_plug_vizia::widgets::{RawParamEvent,ParamEvent};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -94,7 +94,7 @@ pub(crate) fn create(
                                 nih_log!("Failed to open browser: {}", e);
                             }
                         });
-                    Label::new(cx, "v0.1.7").class("header-version-title");
+                    Label::new(cx, "v0.1.8").class("header-version-title");
                     Element::new(cx)
                         .class("insta-button")
                         .on_press(|_| {
@@ -319,7 +319,7 @@ pub fn create_text_button<'a, T, L, F>(
     selector: F,
     class: &str,
     toggle_class: &str,
-) -> Handle<'a, DebugWrapper> // Returns the Wrapper Handle
+) -> Handle<'a, DebugWrapper>
 where
     T: 'static + Send + Sync,
     L: Lens<Target = bool> + Copy + 'static + Send + Sync,
@@ -327,33 +327,35 @@ where
 {
     let params_arc = params.clone();
     let selector = selector.clone();
-    let debug_name = label_text;
 
-    // 1. Create the Wrapper (This becomes the "Button Body")
-    DebugWrapper::new(cx, debug_name, move |cx| {
-        // 2. The Text Label (Just the content now)
-        Label::new(cx, label_text)
-            .hoverable(false); // Let clicks pass through to the wrapper
+    DebugWrapper::new(cx, label_text, move |cx| {
+        Label::new(cx, label_text).hoverable(false);
     })
-        // 3. Apply Styling to the Wrapper
         .class(class)
         .toggle_class(toggle_class, lens)
-        // 4. Attach Event Logic to the Wrapper
+        .focusable(true)
         .on_press(move |cx| {
             cx.focus();
+
             let param = selector(&params_arc);
             let new_value = !param.value();
+            let normalized = if new_value { 1.0 } else { 0.0 };
 
+            // --- 1. PREPARE THE DATA ---
             let ptr = param.as_ptr();
+            let param_static: &'static BoolParam = unsafe { std::mem::transmute(param) };
 
+            // --- 2. SEND STANDARD EVENTS (FOR HOSTS/VST3) ---
+            cx.emit(ParamEvent::BeginSetParameter(param_static));
+            cx.emit(ParamEvent::SetParameterNormalized(param_static, normalized));
+            cx.emit(ParamEvent::EndSetParameter(param_static));
+
+            // --- 3. SEND RAW EVENTS (FOR STANDALONE/INTERNAL WRAPPERS) ---
             cx.emit(RawParamEvent::BeginSetParameter(ptr));
-            cx.emit(RawParamEvent::SetParameterNormalized(
-                ptr,
-                if new_value { 1.0 } else { 0.0 },
-            ));
+            cx.emit(RawParamEvent::SetParameterNormalized(ptr, normalized));
             cx.emit(RawParamEvent::EndSetParameter(ptr));
 
-            nih_log!("SUCCESS: [{}] executed on_press!", label_text);
+            nih_log!("SUCCESS: [{}] Sent BOTH event types.", label_text);
         })
 }
 
