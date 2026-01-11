@@ -25,6 +25,7 @@ mod editor;
 
 const TIME_MS_MIN: f32 = 1.0;
 const TIME_MS_MAX: f32 = 1500.0;
+const NUM_SYNC_STEPS: f32 = 18.0;
 
 pub struct TapeDelay {
     params: Arc<TapeParams>,
@@ -148,8 +149,7 @@ impl Default for TapeParams {
                     // the atomic is initialized correctly from the PERSISTED state.
                     if time_sync_flag_for_formatter.load(Ordering::Relaxed) {
                         let normalized = (value - TIME_MS_MIN) / (TIME_MS_MAX - TIME_MS_MIN);
-                        let step_index = (normalized * 17.99).floor() as i32;
-                        let (_, label) = get_beat_info(step_index);
+                        let (_, label) = get_beat_info(normalized);
                         label.to_string()
                     } else {
                         format!("{:.1} ms", value)
@@ -269,7 +269,7 @@ impl Plugin for TapeDelay {
     const VENDOR: &'static str = "Convolution DEV";
     const URL: &'static str = "https://youtu.be/dQw4w9WgXcQ";
     const EMAIL: &'static str = "email@example.com";
-    const VERSION: &'static str = "0.1.5";
+    const VERSION: &'static str = "0.1.6";
 
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
         main_input_channels: NonZeroU32::new(2),
@@ -450,13 +450,8 @@ impl Plugin for TapeDelay {
             // Normalize: (Val - Min) / (Max - Min) -> Result is 0.0 to 1.0
             let normalized = (current_ms - TIME_MS_MIN) / (TIME_MS_MAX - TIME_MS_MIN);
 
-            // Map 0.0-1.0 to 0-15 (16 steps)
-            // We use .floor() to create stable "zones" for each step.
-            let total_steps = 16.0;
-            let step_index = (normalized * (total_steps - 0.01)).floor() as i32;
-
             // C. Get Multiplier
-            let multiplier = get_beat_info(step_index).0; // Uses the helper function from before
+            let (multiplier, _) = get_beat_info(normalized);
 
             // D. Calculate Samples
             (seconds_per_beat * multiplier) * sample_rate
@@ -658,9 +653,22 @@ impl Plugin for TapeDelay {
     }
 }
 
-// Returns (Multiplier, Label)
-// Ordered by musical length (Shortest -> Longest)
-fn get_beat_info(step_index: i32) -> (f32, &'static str) {
+pub fn normalized_to_sync_step(normalized: f32) -> i32 {
+    // 1. Multiply by total steps
+    let step = normalized * NUM_SYNC_STEPS;
+
+    // 2. Floor to get the index
+    let step_i32 = step.floor() as i32;
+
+    // 3. Safety Clamp: Ensure we never go out of bounds (e.g. if normalized is exactly 1.0)
+    // The valid range is 0 to 17.
+    step_i32.clamp(0, (NUM_SYNC_STEPS as i32) - 1)
+}
+
+pub fn get_beat_info(normalized: f32) -> (f32, &'static str) {
+    // CALL THE SHARED FUNCTION HERE
+    let step_index = normalized_to_sync_step(normalized);
+
     match step_index {
         0 => (0.0625, "1/64"),   // Straight
         1 => (0.125, "1/32"),    // Straight
@@ -680,7 +688,7 @@ fn get_beat_info(step_index: i32) -> (f32, &'static str) {
         15 => (3.0, "1/2 ."),
         16 => (4.0, "1 Bar"),
         17 => (8.0, "2 Bar"),
-        _ => (1.0, "1/4"), // Fallback
+        _ => (1.0, "1/4"), // Should never happen thanks to clamp
     }
 }
 

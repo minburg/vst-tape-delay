@@ -1,6 +1,6 @@
 [package]
 name = "tape_delay"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 authors = ["Marinus Burger <convolution_official@protonmail.com>"]
 license = "GPL-3.0-or-later"

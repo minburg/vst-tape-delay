@@ -8,7 +8,7 @@ use nih_plug::prelude::{util, Editor};
 use nih_plug_vizia::assets::register_noto_sans_light;
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::widgets::ResizeHandle;
-use nih_plug_vizia::widgets::{ParamButton, RawParamEvent};
+use nih_plug_vizia::widgets::{RawParamEvent};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -94,7 +94,7 @@ pub(crate) fn create(
                                 nih_log!("Failed to open browser: {}", e);
                             }
                         });
-                    Label::new(cx, "v0.1.5").class("header-version-title");
+                    Label::new(cx, "v0.1.6").class("header-version-title");
                     Element::new(cx)
                         .class("insta-button")
                         .on_press(|_| {
