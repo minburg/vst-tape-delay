@@ -94,7 +94,7 @@ pub(crate) fn create(
                                 nih_log!("Failed to open browser: {}", e);
                             }
                         });
-                    Label::new(cx, "v0.1.10").class("header-version-title");
+                    Label::new(cx, "v0.1.11").class("header-version-title");
                     Element::new(cx)
                         .class("insta-button")
                         .on_press(|_| {
@@ -344,20 +344,30 @@ where
             let normalized = if new_value { 1.0 } else { 0.0 };
             let param_static: &'static BoolParam = unsafe { std::mem::transmute(param) };
 
-            // --- 1. BEGIN GESTURE (Double) ---
+            // --- PHASE 1: OPEN THE GESTURE & PERFORM ---
             cx.emit(ParamEvent::BeginSetParameter(param_static));
             cx.emit(RawParamEvent::BeginSetParameter(ptr));
 
-            // --- 2. PERFORM EDIT (Double) ---
-            // We send the value change while the "gate" is open for both systems
             cx.emit(ParamEvent::SetParameterNormalized(param_static, normalized));
             cx.emit(RawParamEvent::SetParameterNormalized(ptr, normalized));
 
-            // --- 3. END GESTURE (Double) ---
-            cx.emit(ParamEvent::EndSetParameter(param_static));
-            cx.emit(RawParamEvent::EndSetParameter(ptr));
+            // --- PHASE 2: START THE TIMER TO CLOSE THE GESTURE ---
+            // We set the interval and duration to 20ms.
+            let duration = std::time::Duration::from_millis(20);
 
-            nih_log!("SYMMETRIC GESTURE: {} -> {}", label_text, new_value);
+            cx.add_timer(duration, Some(duration), move |cx, action| {
+                match action {
+                    TimerAction::Stop => {
+                        // This happens 20ms later, giving Cubase time to "see" the change
+                        cx.emit(ParamEvent::EndSetParameter(param_static));
+                        cx.emit(RawParamEvent::EndSetParameter(ptr));
+                        nih_log!("TIMER: Gesture Closed for {}", label_text);
+                    }
+                    _ => {} // Ignore Start and Tick
+                }
+            });
+
+            nih_log!("TIMER: Gesture Opened for {} (20ms duration)", label_text);
         })
 }
 
