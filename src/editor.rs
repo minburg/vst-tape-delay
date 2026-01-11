@@ -94,7 +94,7 @@ pub(crate) fn create(
                                 nih_log!("Failed to open browser: {}", e);
                             }
                         });
-                    Label::new(cx, "v0.1.8").class("header-version-title");
+                    Label::new(cx, "v0.1.9").class("header-version-title");
                     Element::new(cx)
                         .class("insta-button")
                         .on_press(|_| {
@@ -335,27 +335,29 @@ where
         .toggle_class(toggle_class, lens)
         .focusable(true)
         .on_press(move |cx| {
+            // --- 1. THE LOW-LEVEL MAC FIX ---
+            // This tells the OS/Host that this window is now 'Active'.
+            // This is often required for the Host to accept Automation Events.
+            cx.set_active(true);
             cx.focus();
 
             let param = selector(&params_arc);
             let new_value = !param.value();
             let normalized = if new_value { 1.0 } else { 0.0 };
 
-            // --- 1. PREPARE THE DATA ---
             let ptr = param.as_ptr();
             let param_static: &'static BoolParam = unsafe { std::mem::transmute(param) };
 
-            // --- 2. SEND STANDARD EVENTS (FOR HOSTS/VST3) ---
+            // --- 2. BROADCAST TO ALL CHANNELS ---
             cx.emit(ParamEvent::BeginSetParameter(param_static));
             cx.emit(ParamEvent::SetParameterNormalized(param_static, normalized));
             cx.emit(ParamEvent::EndSetParameter(param_static));
 
-            // --- 3. SEND RAW EVENTS (FOR STANDALONE/INTERNAL WRAPPERS) ---
             cx.emit(RawParamEvent::BeginSetParameter(ptr));
             cx.emit(RawParamEvent::SetParameterNormalized(ptr, normalized));
             cx.emit(RawParamEvent::EndSetParameter(ptr));
 
-            nih_log!("SUCCESS: [{}] Sent BOTH event types.", label_text);
+            nih_log!("CLICK: {} -> {}. Active: {}", label_text, new_value, cx.is_active());
         })
 }
 
