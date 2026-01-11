@@ -94,7 +94,7 @@ pub(crate) fn create(
                                 nih_log!("Failed to open browser: {}", e);
                             }
                         });
-                    Label::new(cx, "v0.1.6").class("header-version-title");
+                    Label::new(cx, "v0.1.7").class("header-version-title");
                     Element::new(cx)
                         .class("insta-button")
                         .on_press(|_| {
@@ -311,9 +311,6 @@ pub(crate) fn create(
     })
 }
 
-/// A text label that acts exactly like a BoolParam button.
-/// - Uses `on_press` to fix Cubase/Mac clicking issues.
-/// - Toggles the CSS class "active" when the parameter is true.
 pub fn create_text_button<'a, T, L, F>(
     cx: &'a mut Context,
     label_text: &'static str,
@@ -322,7 +319,7 @@ pub fn create_text_button<'a, T, L, F>(
     selector: F,
     class: &str,
     toggle_class: &str,
-) -> Handle<'a, Label>
+) -> Handle<'a, DebugWrapper> // Returns the Wrapper Handle
 where
     T: 'static + Send + Sync,
     L: Lens<Target = bool> + Copy + 'static + Send + Sync,
@@ -330,11 +327,20 @@ where
 {
     let params_arc = params.clone();
     let selector = selector.clone();
+    let debug_name = label_text;
 
-    Label::new(cx, label_text)
+    // 1. Create the Wrapper (This becomes the "Button Body")
+    DebugWrapper::new(cx, debug_name, move |cx| {
+        // 2. The Text Label (Just the content now)
+        Label::new(cx, label_text)
+            .hoverable(false); // Let clicks pass through to the wrapper
+    })
+        // 3. Apply Styling to the Wrapper
         .class(class)
         .toggle_class(toggle_class, lens)
+        // 4. Attach Event Logic to the Wrapper
         .on_press(move |cx| {
+            cx.focus();
             let param = selector(&params_arc);
             let new_value = !param.value();
 
@@ -346,5 +352,66 @@ where
                 if new_value { 1.0 } else { 0.0 },
             ));
             cx.emit(RawParamEvent::EndSetParameter(ptr));
+
+            nih_log!("SUCCESS: [{}] executed on_press!", label_text);
         })
+}
+
+pub struct DebugWrapper {
+    name: String,
+}
+
+impl DebugWrapper {
+    // FIX: Added lifetime 'a to tie the Handle to the Context
+    pub fn new<'a, F>(cx: &'a mut Context, name: &str, content: F) -> Handle<'a, Self>
+    where
+        F: FnOnce(&mut Context),
+    {
+        Self {
+            name: name.to_string(),
+        }
+            .build(cx, |cx| {
+                (content)(cx);
+            })
+    }
+}
+
+impl View for DebugWrapper {
+    fn element(&self) -> Option<&'static str> {
+        Some("debug-wrapper")
+    }
+
+    fn event(&mut self, cx: &mut EventContext, event: &mut Event) {
+        event.map(|window_event, _| {
+            match window_event {
+                WindowEvent::MouseEnter => {
+                    nih_log!("[{}] Mouse ENTER. Bounds: {:?}", self.name, cx.bounds());
+                }
+                WindowEvent::MouseLeave => {
+                    nih_log!("[{}] Mouse LEAVE", self.name);
+                }
+                WindowEvent::MouseDown(btn) => {
+                    let mouse = cx.mouse();
+                    nih_log!(
+                        "[{}] Mouse DOWN ({:?}). \n\t-> Mouse Pos: ({}, {})\n\t-> Btn Bounds: ({}, {}, {}, {})",
+                        self.name,
+                        btn,
+                        mouse.cursorx,
+                        mouse.cursory,
+                        cx.bounds().x, cx.bounds().y, cx.bounds().w, cx.bounds().h
+                    );
+                }
+                WindowEvent::MouseUp(btn) => {
+                    nih_log!("[{}] Mouse UP ({:?})", self.name, btn);
+                }
+                WindowEvent::FocusIn => {
+                    nih_log!("[{}] Focus GAINED", self.name);
+                }
+                WindowEvent::FocusOut => {
+                    nih_log!("[{}] Focus LOST", self.name);
+                }
+                _ => {}
+            }
+        });
+    }
 }
