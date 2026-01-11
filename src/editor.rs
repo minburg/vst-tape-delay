@@ -2,17 +2,19 @@ use crate::editor::single_knob::SingleKnob;
 use crate::nih_error;
 use crate::nih_log;
 use crate::AtomicF32;
+use crate::BoolParam;
+use nih_plug::prelude::Param;
 use nih_plug::prelude::{util, Editor};
 use nih_plug_vizia::assets::register_noto_sans_light;
-use nih_plug_vizia::widgets::ParamButton;
+use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::widgets::ResizeHandle;
+use nih_plug_vizia::widgets::{ParamButton, RawParamEvent};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::editor::my_peak_meter::MyPeakMeter;
 use crate::TapeParams;
 use nih_plug_vizia::vizia::image::load_from_memory;
-use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::{create_vizia_editor, ViziaState, ViziaTheming};
 
 use self::param_knob::ParamKnob;
@@ -21,13 +23,13 @@ mod my_peak_meter;
 mod param_knob;
 mod single_knob;
 
-pub const ORBITRON_TTF: &[u8] = include_bytes!("./resource/Orbitron-Regular.ttf");
-pub const COMFORTAA_LIGHT_TTF: &[u8] = include_bytes!("./resource/Comfortaa-Light.ttf");
+pub const ORBITRON_TTF: &[u8] = include_bytes!("resource/fonts/Orbitron-Regular.ttf");
+pub const COMFORTAA_LIGHT_TTF: &[u8] = include_bytes!("resource/fonts/Comfortaa-Light.ttf");
 pub const COMFORTAA: &str = "Comfortaa";
 
-const BG_IMAGE_BYTES: &[u8] = include_bytes!("./resource/ghost.png");
-const INSTA_ICON_BYTES: &[u8] = include_bytes!("./resource/Instagram_icon_2.png");
-const SPOTIFY_ICON_BYTES: &[u8] = include_bytes!("./resource/Spotify_logo_2.png");
+const BG_IMAGE_BYTES: &[u8] = include_bytes!("resource/images/background_image.png");
+const INSTA_ICON_BYTES: &[u8] = include_bytes!("resource/images/instagram_icon.png");
+const SPOTIFY_ICON_BYTES: &[u8] = include_bytes!("resource/images/spotify_icon.png");
 
 #[derive(Lens)]
 struct Data {
@@ -56,7 +58,7 @@ pub(crate) fn create(
         cx.set_default_font(&[COMFORTAA]);
 
         match load_from_memory(BG_IMAGE_BYTES) {
-            Ok(img) => cx.load_image("ghost.png", img, ImageRetentionPolicy::Forever),
+            Ok(img) => cx.load_image("background_image.png", img, ImageRetentionPolicy::Forever),
             Err(e) => nih_error!("Failed to load image: {}", e),
         }
 
@@ -92,7 +94,7 @@ pub(crate) fn create(
                                 nih_log!("Failed to open browser: {}", e);
                             }
                         });
-                    Label::new(cx, "v0.1.4").class("header-version-title");
+                    Label::new(cx, "v0.1.5").class("header-version-title");
                     Element::new(cx)
                         .class("insta-button")
                         .on_press(|_| {
@@ -103,18 +105,16 @@ pub(crate) fn create(
                         .on_press(|_| {
                             let _ = webbrowser::open("https://open.spotify.com/artist/7k0eMwQbplT3Zyyy0DalRL?si=aalp-7GQQ2O_cZRodAlsNg");
                         });
-
                 })
                     .width(Stretch(1.0))
                     .child_space(Stretch(1.0))
                     .child_top(Stretch(0.01))
                     .child_bottom(Stretch(0.01))
                     .class("link-section");
-
             })
-            .row_between(Pixels(10.0))
-            .child_space(Stretch(1.0))
-            .class("title-section");
+                .row_between(Pixels(10.0))
+                .child_space(Stretch(1.0))
+                .class("title-section");
 
             HStack::new(cx, |cx| {
                 VStack::new(cx, |cx| {
@@ -125,9 +125,9 @@ pub(crate) fn create(
                         }),
                         Some(Duration::from_millis(30)),
                     )
-                    .class("vu-meter-no-text")
-                    .width(Stretch(1.0))
-                    .height(Pixels(45.0));
+                        .class("vu-meter-no-text")
+                        .width(Stretch(1.0))
+                        .height(Pixels(45.0));
                     MyPeakMeter::new(
                         cx,
                         Data::peak_meter_r.map(|peak_meter_r| {
@@ -135,46 +135,76 @@ pub(crate) fn create(
                         }),
                         Some(Duration::from_millis(30)),
                     )
-                    .class("vu-meter")
-                    .width(Stretch(1.0))
-                    .height(Pixels(45.0));
+                        .class("vu-meter")
+                        .width(Stretch(1.0))
+                        .height(Pixels(45.0));
                 })
-                .height(Stretch(1.0))
-                .width(Stretch(1.1));
+                    .height(Stretch(1.0))
+                    .width(Stretch(1.1));
 
                 HStack::new(cx, |cx| {
-                    ParamButton::new(cx, Data::tape_data, |params| &params.broken_tape)
+                    // Broken
+                    create_text_button(
+                        cx,
+                        "Broken",
+                        Data::tape_data.map(|p| p.broken_tape.value()),
+                        &tape_data,
+                        |p| &p.broken_tape,
+                        "broken-param-button",
+                        "active",
+                    )
                         .width(Stretch(0.45))
                         .height(Stretch(0.5))
                         .child_left(Stretch(1.0))
                         .child_right(Stretch(1.0))
-                        .class("broken-button");
+                        .child_top(Stretch(0.08))
+                        .child_bottom(Stretch(0.08));
 
-                    ParamButton::new(cx, Data::tape_data, |params| &params.time_sync)
+                    // Time Sync
+                    create_text_button(
+                        cx,
+                        "Time Sync",
+                        Data::tape_data.map(|p| p.time_sync.value()),
+                        &tape_data,
+                        |p| &p.time_sync,
+                        "sync-param-button",
+                        "active",
+                    )
                         .width(Stretch(0.6))
                         .height(Stretch(0.5))
                         .child_left(Stretch(1.0))
                         .child_right(Stretch(1.0))
-                        .class("sync-button");
+                        .child_top(Stretch(0.08))
+                        .child_bottom(Stretch(0.08));
 
-                    ParamButton::new(cx, Data::tape_data, |params| &params.distortion_mode)
+                    // Tape Only
+                    create_text_button(
+                        cx,
+                        "Tape Only",
+                        Data::tape_data.map(|p| p.distortion_mode.value()),
+                        &tape_data,
+                        |p| &p.distortion_mode,
+                        "distortion-param-button",
+                        "active",
+                    )
                         .width(Stretch(0.6))
                         .height(Stretch(0.5))
                         .child_left(Stretch(1.0))
                         .child_right(Stretch(1.0))
-                        .class("distortion-button");
+                        .child_top(Stretch(0.08))
+                        .child_bottom(Stretch(0.08));
                 })
-                .height(Stretch(1.0))
-                .width(Stretch(1.5))
-                .col_between(Pixels(15.0))
-                .child_top(Stretch(0.08))
-                .child_bottom(Stretch(0.08));
+                    .height(Stretch(1.0))
+                    .width(Stretch(1.5))
+                    .col_between(Pixels(15.0))
+                    .child_top(Stretch(0.08))
+                    .child_bottom(Stretch(0.08));
             })
-            .width(Stretch(0.8))
-            .height(Stretch(0.25))
-            .child_top(Stretch(0.01))
-            .child_bottom(Stretch(0.01))
-            .class("meter-section");
+                .width(Stretch(0.8))
+                .height(Stretch(0.25))
+                .child_top(Stretch(0.01))
+                .child_bottom(Stretch(0.01))
+                .class("meter-section");
 
             HStack::new(cx, |cx| {
                 HStack::new(cx, |cx| {
@@ -185,20 +215,20 @@ pub(crate) fn create(
                     SingleKnob::new(cx, Data::tape_data, |params| &params.stereo_width, false)
                         .width(Stretch(1.0));
                 })
-                .class("finetune-section-inner");
+                    .class("finetune-section-inner");
             })
-            .width(Stretch(1.0))
-            .height(Stretch(0.4))
-            .child_top(Stretch(0.08))
-            .child_bottom(Stretch(0.08))
-            .class("finetune-section");
+                .width(Stretch(1.0))
+                .height(Stretch(0.4))
+                .child_top(Stretch(0.08))
+                .child_bottom(Stretch(0.08))
+                .class("finetune-section");
 
             HStack::new(cx, |cx| {
                 VStack::new(cx, |cx| {
                     ParamKnob::new(cx, Data::tape_data, |params| &params.gain, false)
                         .width(Stretch(1.0));
                 })
-                .class("portion");
+                    .class("portion");
                 VStack::new(cx, |cx| {
                     // Create a Binding to listen to the Distortion Mode boolean
                     Binding::new(cx, Data::tape_data.map(|p| p.distortion_mode.value()), |cx, is_dist_lens| {
@@ -221,7 +251,7 @@ pub(crate) fn create(
                         }
                     });
                 })
-                .class("portion");
+                    .class("portion");
                 VStack::new(cx, |cx| {
                     // Create a Binding to listen to the Distortion Mode boolean
                     Binding::new(cx, Data::tape_data.map(|p| p.distortion_mode.value()), |cx, is_dist_lens| {
@@ -244,7 +274,7 @@ pub(crate) fn create(
                         }
                     });
                 })
-                .class("portion");
+                    .class("portion");
                 VStack::new(cx, |cx| {
                     // Create a Binding to listen to the Distortion Mode boolean
                     Binding::new(cx, Data::tape_data.map(|p| p.distortion_mode.value()), |cx, is_dist_lens| {
@@ -267,16 +297,54 @@ pub(crate) fn create(
                         }
                     });
                 })
-                .class("portion");
+                    .class("portion");
             })
-            .width(Stretch(0.8))
-            .class("knob-section");
+                .width(Stretch(0.8))
+                .class("knob-section");
         })
-        .width(Stretch(1.0))
-        .height(Stretch(1.0))
-        // .child_space(Pixels(5.0))
-        .class("main-gui");
+            .width(Stretch(1.0))
+            .height(Stretch(1.0))
+            // .child_space(Pixels(5.0))
+            .class("main-gui");
 
         ResizeHandle::new(cx);
     })
+}
+
+/// A text label that acts exactly like a BoolParam button.
+/// - Uses `on_press` to fix Cubase/Mac clicking issues.
+/// - Toggles the CSS class "active" when the parameter is true.
+pub fn create_text_button<'a, T, L, F>(
+    cx: &'a mut Context,
+    label_text: &'static str,
+    lens: L,
+    params: &Arc<T>,
+    selector: F,
+    class: &str,
+    toggle_class: &str,
+) -> Handle<'a, Label>
+where
+    T: 'static + Send + Sync,
+    L: Lens<Target = bool> + Copy + 'static + Send + Sync,
+    F: 'static + Clone + Fn(&T) -> &BoolParam + Send + Sync,
+{
+    let params_arc = params.clone();
+    let selector = selector.clone();
+
+    Label::new(cx, label_text)
+        .class(class)
+        .toggle_class(toggle_class, lens)
+        .on_press(move |cx| {
+            let param = selector(&params_arc);
+            let new_value = !param.value();
+
+            let ptr = param.as_ptr();
+
+            cx.emit(RawParamEvent::BeginSetParameter(ptr));
+            cx.emit(RawParamEvent::SetParameterNormalized(
+                ptr,
+                if new_value { 1.0 } else { 0.0 },
+            ));
+            cx.emit(RawParamEvent::EndSetParameter(ptr));
+        })
 }

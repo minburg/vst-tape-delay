@@ -1,6 +1,6 @@
 .main-gui {
     /*background-color: #1e1e1e;*/
-    background-image: url("ghost.png");
+    background-image: url("background_image.png");
     background-size: cover;
 }
 
@@ -53,80 +53,6 @@
     font-size: 18.0;
     font-family: "Comfortaa";
 }
-
-
-
-.sync-button {
-    background-color: #512540;
-    color: #d28819;
-    font-size: 30.0;
-    font-weight: bold;
-    font-family: "Comfortaa";
-}
-.sync-button:hover {
-    background-color: rgba(81, 37, 64, 0.5);
-    color: #d28819;
-}
-
-.sync-button:checked {
-    background-color: #d28819;
-    color: #512540;
-}
-.sync-button:hover:checked {
-    background-color: rgba(210, 136, 25, 0.5);
-    color: #512540;
-}
-
-
-
-.broken-button {
-    background-color: #512540;
-    color: #d28819;
-    font-size: 30.0;
-    font-weight: bold;
-    font-family: "Comfortaa";
-}
-
-.broken-button:hover {
-    background-color: rgba(81, 37, 64, 0.5);
-    color: #d28819;
-}
-
-.broken-button:checked {
-    background-color: #d23519;
-    color: #512540;
-}
-.broken-button:hover:checked {
-    background-color: rgba(210, 53, 25, 0.5);
-    color: #512540;
-}
-
-
-
-.distortion-button {
-    background-color: #915607;
-    color: #272727;
-    border-radius: 15px;
-    font-size: 28.0;
-    /*font-weight: bold;*/
-    font-family: "Orbitron";
-}
-
-.distortion-button:hover {
-    background-color: rgba(145, 86, 7, 0.5);
-    color: #272727;
-}
-
-.distortion-button:checked {
-    background-color: #d23519;
-    color: #512540;
-}
-.distortion-button:hover:checked {
-    background-color: rgba(210, 53, 25, 0.5);
-    color: #512540;
-}
-
-
 
 .title-section {
     width: 1s;
@@ -245,4 +171,89 @@
     width: 35px;
     height: 35px;
     cursor: pointer;
+}
+
+/*---------------------------------------------------------------*/
+
+.broken-param-button {
+    border-width: 1px;
+    border-color: #000000;
+
+    background-color: #512540;
+    color: #d28819;
+    font-size: 30.0;
+    font-weight: bold;
+    font-family: "Comfortaa";
+}
+
+.broken-param-button:hover {
+    background-color: rgba(81, 37, 64, 0.5);
+    color: #d28819;
+}
+
+.broken-param-button.active {
+    background-color: #d23519;
+    color: #512540;
+}
+
+.broken-param-button.active:hover {
+    background-color: rgba(210, 53, 25, 0.5);
+    color: #512540;
+}
+
+/*---------------------------------------------------------------*/
+
+.sync-param-button {
+    border-width: 1px;
+    border-color: #000000;
+
+    background-color: #512540;
+    color: #d28819;
+    font-size: 30.0;
+    font-weight: bold;
+    font-family: "Comfortaa";
+}
+
+.sync-param-button:hover {
+    background-color: rgba(81, 37, 64, 0.5);
+    color: #d28819;
+}
+
+.sync-param-button.active {
+    background-color: #d28819;
+    color: #512540;
+}
+
+.sync-param-button.active:hover {
+    background-color: rgba(210, 136, 25, 0.5);
+    color: #512540;
+}
+
+/*---------------------------------------------------------------*/
+
+.distortion-param-button {
+    border-width: 1px;
+    border-color: #000000;
+
+    background-color: #915607;
+    color: #272727;
+    border-radius: 15px;
+    font-size: 28.0;
+    /*font-weight: bold;*/
+    font-family: "Orbitron";
+}
+
+.distortion-param-button:hover {
+    background-color: rgba(145, 86, 7, 0.5);
+    color: #272727;
+}
+
+.distortion-param-button.active {
+    background-color: #d23519;
+    color: #512540;
+}
+
+.distortion-param-button.active:hover {
+    background-color: rgba(210, 53, 25, 0.5);
+    color: #512540;
 }
