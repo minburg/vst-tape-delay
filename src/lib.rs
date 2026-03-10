@@ -57,6 +57,17 @@ pub struct TapeDelay {
     dropout_smoother: f32,
     dropout_timer: f32, // Tracks how much longer the tape stays "unplugged"
 
+    // Corrosion (Erosion-style phase-modulated delay) State
+    corrosion_buf_l: Vec<f32>,
+    corrosion_buf_r: Vec<f32>,
+    corrosion_write: usize,
+    corrosion_sine_phase: f32,
+    // Bandpass filter states for noise modulator (two 1-pole stages each channel)
+    corrosion_bp_l: [f32; 2],
+    corrosion_bp_r: [f32; 2],
+    // Small LCG for corrosion noise generation
+    corrosion_rng: u32,
+
     /// The decay factor for a single sample
     meter_decay_per_sample: f32,
     peak_meter_l: Arc<AtomicF32>,
@@ -216,8 +227,8 @@ impl Default for TapeParams {
                     max: 1.0,
                 },
             )
-                .with_smoother(SmoothingStyle::Linear(15.0))
-                .with_value_to_string(formatters::v2s_f32_rounded(1)),
+            .with_smoother(SmoothingStyle::Linear(15.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
             stereo_width: FloatParam::new(
                 "Width",
                 0.0,
@@ -234,6 +245,10 @@ impl Default for TapeParams {
 
 impl Default for TapeDelay {
     fn default() -> Self {
+
+        // 2ms base delay + 1ms max mod depth at 44100 Hz = ~133 samples max
+        // Allocate for up to 192kHz: ceil(192000 * 0.003) = 576, keep power-of-two margin
+        let corrosion_buf_size = 2048usize;
         Self {
             params: Arc::new(TapeParams::default()),
             delay_buffer_l: Vec::new(),
@@ -252,6 +267,15 @@ impl Default for TapeDelay {
             rng_seed: 12345,
             dropout_smoother: 1.0, // Start with perfect health
             dropout_timer: 0.0,    // Start with no active dropout
+
+            corrosion_buf_l: vec![0.0; corrosion_buf_size],
+            corrosion_buf_r: vec![0.0; corrosion_buf_size],
+            corrosion_write: 0,
+            corrosion_sine_phase: 0.0,
+            corrosion_bp_l: [0.0; 2],
+            corrosion_bp_r: [0.0; 2],
+            corrosion_rng: 0xDEAD_BEEF,
+
             meter_decay_per_sample: 1.0,
             peak_meter_l: Arc::new(AtomicF32::new(0.0)), // 0.0 Linear = Silence
             peak_meter_r: Arc::new(AtomicF32::new(0.0)),
@@ -269,7 +293,7 @@ impl Plugin for TapeDelay {
     const VENDOR: &'static str = "Convolution DEV";
     const URL: &'static str = "https://youtu.be/dQw4w9WgXcQ";
     const EMAIL: &'static str = "email@example.com";
-    const VERSION: &'static str = "0.1.11";
+    const VERSION: &'static str = "0.1.12";
 
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
         main_input_channels: NonZeroU32::new(2),
@@ -300,6 +324,15 @@ impl Plugin for TapeDelay {
         self.delay_buffer_l = vec![0.0; max_samples];
         self.delay_buffer_r = vec![0.0; max_samples];
 
+        // Resize corrosion delay buffers for the actual sample rate.
+        // We need at least (base_delay + max_mod_depth) * sample_rate samples:
+        //   2ms base + 1ms max depth = 3ms => sample_rate * 0.003, rounded up with margin.
+        let corrosion_buf_size =
+            ((_buffer_config.sample_rate * 0.004) as usize + 4).next_power_of_two();
+        self.corrosion_buf_l = vec![0.0; corrosion_buf_size];
+        self.corrosion_buf_r = vec![0.0; corrosion_buf_size];
+        self.corrosion_write = 0;
+
         let release_db_per_second = 30.0;
 
         // Calculate the constant for 1 sample of decay
@@ -312,7 +345,16 @@ impl Plugin for TapeDelay {
         true
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+
+        // Clear corrosion state
+        self.corrosion_buf_l.iter_mut().for_each(|s| *s = 0.0);
+        self.corrosion_buf_r.iter_mut().for_each(|s| *s = 0.0);
+        self.corrosion_write = 0;
+        self.corrosion_sine_phase = 0.0;
+        self.corrosion_bp_l = [0.0; 2];
+        self.corrosion_bp_r = [0.0; 2];
+    }
 
     fn process(
         &mut self,
@@ -323,218 +365,60 @@ impl Plugin for TapeDelay {
         let sample_rate = self.sample_rate;
         let buffer_len = self.delay_buffer_l.len();
 
-        // 1. Get Current State
+        // --- STATE MANAGEMENT ---
         let is_distortion_mode = self.params.distortion_mode.value();
-
-        // 2. EDGE DETECTION: Check if we just switched OFF distortion mode
         if self.was_distortion_mode && !is_distortion_mode {
-            // Clear the buffers to remove old "ghost" echoes
             self.delay_buffer_l.fill(0.0);
             self.delay_buffer_r.fill(0.0);
-
-            // Optional: Reset write head to avoid clicking (optional, but cleaner)
-            // self.write_pos = 0;
         }
-
-        // 3. Update the state tracker for the NEXT block
         self.was_distortion_mode = is_distortion_mode;
-
-        // --- DISTORTION MODE: Direct Signal Path ---
-        if is_distortion_mode {
-            let is_broken = self.params.broken_tape.value();
-            let tape_constants = calculate_tape_constants(sample_rate, is_broken);
-
-            let mut max_amplitude_in_block_l: f32 = 0.0;
-            let mut max_amplitude_in_block_r: f32 = 0.0;
-
-            for channel_samples in buffer.iter_samples() {
-                update_lfo_phase(&mut self.lfo_phase, tape_constants.flutter_rate);
-
-                let gain_amt = self.params.gain.smoothed.next();
-                let noise_amt = self.params.noise.smoothed.next();
-                let crackle_amt = self.params.crackle.smoothed.next();
-                let (makeup_gain, compensated_noise_amt, compensated_crackle_amt ) =
-                    calculate_gain_compensation(
-                        gain_amt,
-                        tape_constants.noise_amount,
-                        tape_constants.crackle_amount,
-                        noise_amt,
-                        crackle_amt,
-                    );
-
-                let vol_mod = update_dropout_smoother(
-                    is_broken,
-                    &mut self.dropout_smoother,
-                    &mut self.dropout_timer,
-                    &mut self.rng_seed,
-                    sample_rate,
-                );
-
-                let mut samples = channel_samples.into_iter();
-
-                // --- LEFT CHANNEL DIRECT PROCESSING ---
-                if let Some(sample_l) = samples.next() {
-                    *sample_l = process_direct_distortion_channel(
-                        *sample_l,
-                        &mut self.lp_state_l,
-                        &mut self.rng_seed,
-                        &mut self.crackle_integrator_l,
-                        &mut self.crackle_hp_l,
-                        tape_constants.current_tone_cutoff,
-                        tape_constants.crackle_threshold,
-                        compensated_noise_amt,
-                        compensated_crackle_amt,
-                        vol_mod,
-                        gain_amt,
-                        makeup_gain,
-                    );
-
-                    let abs_l = sample_l.abs();
-                    if abs_l > max_amplitude_in_block_l {
-                        max_amplitude_in_block_l = abs_l;
-                    }
-                }
-
-                // --- RIGHT CHANNEL DIRECT PROCESSING ---
-                if let Some(sample_r) = samples.next() {
-                    *sample_r = process_direct_distortion_channel(
-                        *sample_r,
-                        &mut self.lp_state_r,
-                        &mut self.rng_seed,
-                        &mut self.crackle_integrator_r,
-                        &mut self.crackle_hp_r,
-                        tape_constants.current_tone_cutoff,
-                        tape_constants.crackle_threshold,
-                        compensated_noise_amt,
-                        compensated_crackle_amt,
-                        vol_mod,
-                        gain_amt,
-                        makeup_gain,
-                    );
-
-                    let abs_r = sample_r.abs();
-                    if abs_r > max_amplitude_in_block_r {
-                        max_amplitude_in_block_r = abs_r;
-                    }
-                }
-            }
-
-            update_peak_meters(
-                self.params.editor_state.is_open(),
-                buffer.samples() as f32,
-                self.meter_decay_per_sample,
-                &self.peak_meter_l,
-                &self.peak_meter_r,
-                max_amplitude_in_block_l,
-                max_amplitude_in_block_r,
-            );
-
-            return ProcessStatus::Normal;
-        }
-
-        // --- TAPE DELAY MODE (Original Code) ---
-        // 1. DETERMINE TARGET DELAY (Dual Mode Logic)
-        let raw_target_samples = if self.params.time_sync.value() {
-            // --- SYNC MODE (Stepped) ---
-
-            // A. Get BPM (Default to 120.0)
-            let bpm = _ctx.transport().tempo.unwrap_or(120.0) as f32;
-            let seconds_per_beat = 60.0 / bpm;
-
-            // B. Map the Knob to 16 Steps
-            // We need the "normalized" value of the knob (0.0 to 1.0).
-            // If your framework provides .normalized_value(), use that.
-            // If not, we calculate it manually assuming range is 1.0 to 1000.0 ms.
-            let current_ms = self.params.delay_time_ms.value();
-
-            // Normalize: (Val - Min) / (Max - Min) -> Result is 0.0 to 1.0
-            let normalized = (current_ms - TIME_MS_MIN) / (TIME_MS_MAX - TIME_MS_MIN);
-
-            // C. Get Multiplier
-            let (multiplier, _) = get_beat_info(normalized);
-
-            // D. Calculate Samples
-            (seconds_per_beat * multiplier) * sample_rate
-        } else {
-            // --- FREE MODE (Continuous) ---
-            (self.params.delay_time_ms.value() / 1000.0) * sample_rate
-        };
-
-        // 2. SAFETY CLAMP (The "Safe Target")
-        // Ensure we never try to read past the end of the allocated buffer.
-        // We leave a 100-sample margin for the interpolation and jitter.
-        let max_safe_samples = buffer_len as f32 - 100.0;
-
-        // The .min() function returns the smaller of the two values.
-        // If raw_target is 350,000 but buffer is only 100,000, this snaps it to 99,900.
-        let target_delay_samples = raw_target_samples.min(max_safe_samples);
 
         let is_broken = self.params.broken_tape.value();
         let tape_constants = calculate_tape_constants(sample_rate, is_broken);
-        let flutter_depth = 15.0;
-
-        // --- STEREOIZER: GET KNOB VALUE ---
-        // Range 0.0 (Mono) to 1.0 (Super Wide)
         let width_amt = self.params.stereo_width.value();
 
-        if buffer_len == 0 {
-            return ProcessStatus::Normal;
-        }
-
         // --- METERING PREP ---
-        // We want to find the loudest peak in this entire buffer block
         let mut max_amplitude_in_block_l: f32 = 0.0;
         let mut max_amplitude_in_block_r: f32 = 0.0;
 
+        // --- DELAY TIME CALCULATION (only for delay mode) ---
+        let target_delay_samples = if !is_distortion_mode {
+            let raw_target_samples = if self.params.time_sync.value() {
+                let bpm = _ctx.transport().tempo.unwrap_or(120.0) as f32;
+                let seconds_per_beat = 60.0 / bpm;
+                let current_ms = self.params.delay_time_ms.value();
+                let normalized = (current_ms - TIME_MS_MIN) / (TIME_MS_MAX - TIME_MS_MIN);
+                let (multiplier, _) = get_beat_info(normalized);
+                (seconds_per_beat * multiplier) * sample_rate
+            } else {
+                (self.params.delay_time_ms.value() / 1000.0) * sample_rate
+            };
+            let max_safe_samples = buffer_len as f32 - 100.0;
+            raw_target_samples.min(max_safe_samples)
+        } else {
+            0.0
+        };
+
+        // --- MAIN DSP LOOP ---
         for channel_samples in buffer.iter_samples() {
-            update_lfo_phase(&mut self.lfo_phase, tape_constants.flutter_rate);
-
-            // --- A. STEREO WOBBLE (LFO Decorrelation) ---
-            // Left channel uses normal LFO phase.
-            // Right channel gets phase-shifted based on width.
-            // At width 1.0, offset is PI (180 deg), meaning L pitches UP while R pitches DOWN.
-            let phase_offset_r = width_amt * std::f32::consts::PI;
-
-            let flutter_offset_l = self.lfo_phase.sin() * flutter_depth;
-            let flutter_offset_r = (self.lfo_phase + phase_offset_r).sin() * flutter_depth;
-
-            // Smooth delay time (Slew Limiting)
-            let smooth_coeff = 0.0005;
-            self.current_delay_samples = (self.current_delay_samples * (1.0 - smooth_coeff))
-                + (target_delay_samples * smooth_coeff);
-
-            // --- B. STEREO SKEW (Haas Offset) ---
-            // We push the heads apart by up to 10ms (approx 441 samples at 44.1k).
-            // L reads earlier (-), R reads later (+).
-            let spread_samples = width_amt * 0.010 * sample_rate;
-
-            // Calculate independent delay times for L and R
-            let mod_delay_samples_l = (self.current_delay_samples - spread_samples + flutter_offset_l).max(0.0);
-            let mod_delay_samples_r = (self.current_delay_samples + spread_samples + flutter_offset_r).max(0.0);
-
-            let mix_amt = if is_distortion_mode {
-                0.0
-            } else {
-                self.params.mix.smoothed.next()
-            };
+            // --- PER-SAMPLE PARAMETER SMOOTHING ---
             let gain_amt = self.params.gain.smoothed.next();
-            let noise_amt = self.params.noise.smoothed.next();
-            let crackle_amt = self.params.crackle.smoothed.next();
-            let feedback_gain = if is_distortion_mode {
-                0.0
-            } else {
-                (self.params.feedback.smoothed.next() * 1.2) / gain_amt.sqrt()
-            };
+            let noise_vol = self.params.noise.smoothed.next();
+            let crackle_vol = self.params.crackle.smoothed.next();
+            let mix_amt = self.params.mix.smoothed.next();
+            let feedback_amt = self.params.feedback.smoothed.next();
 
+            // --- GAIN COMPENSATION ---
             let (makeup_gain, compensated_noise_amt, compensated_crackle_amt) =
                 calculate_gain_compensation(
                     gain_amt,
                     tape_constants.noise_amount,
                     tape_constants.crackle_amount,
-                    noise_amt,
-                    crackle_amt,
+                    noise_vol,
+                    crackle_vol,
                 );
 
+            // --- DROPOUTS ---
             let vol_mod = update_dropout_smoother(
                 is_broken,
                 &mut self.dropout_smoother,
@@ -543,93 +427,128 @@ impl Plugin for TapeDelay {
                 sample_rate,
             );
 
-            // --- C. STEREO TONE (Psychoacoustic Separation) ---
-            // As width increases, spread the filter cutoffs.
-            // L gets darker, R gets brighter.
-            let tone_spread = width_amt * 0.15;
-            let cutoff_l = (tape_constants.current_tone_cutoff - tone_spread).max(0.1);
-            let cutoff_r = (tape_constants.current_tone_cutoff + tone_spread).min(0.95);
-
-            // --- READ HEAD CALCULATION (Split L/R) ---
-            let read_pos_l = (self.write_pos as f32 - mod_delay_samples_l).rem_euclid(buffer_len as f32);
-            let read_pos_r = (self.write_pos as f32 - mod_delay_samples_r).rem_euclid(buffer_len as f32);
+            // --- NOISE & CRACKLE GENERATION ---
+            let (noise_l, crackle_l) = generate_tape_noise_and_crackle(
+                &mut self.rng_seed,
+                &mut self.crackle_integrator_l,
+                &mut self.crackle_hp_l,
+                tape_constants.crackle_threshold,
+                compensated_noise_amt,
+                compensated_crackle_amt,
+            );
+            let (noise_r, crackle_r) = generate_tape_noise_and_crackle(
+                &mut self.rng_seed,
+                &mut self.crackle_integrator_r,
+                &mut self.crackle_hp_r,
+                tape_constants.crackle_threshold,
+                compensated_noise_amt,
+                compensated_crackle_amt,
+            );
 
             let mut samples = channel_samples.into_iter();
+            let sample_l_ref = samples.next().unwrap();
+            let sample_r_ref = samples.next().unwrap();
+            let input_l = *sample_l_ref;
+            let input_r = *sample_r_ref;
 
-            // --- LEFT CHANNEL PROCESSING ---
-            if let Some(sample_l) = samples.next() {
-                let input_l = *sample_l;
+            if is_distortion_mode {
+                // --- TAPE ONLY / DISTORTION MODE ---
+                let mut signal_l = input_l + noise_l + crackle_l;
+                let mut signal_r = input_r + noise_r + crackle_r;
+
+                // Apply corrosion if broken
+                if is_broken {
+                    (signal_l, signal_r) = self.apply_corrosion(sample_rate, signal_l, signal_r);
+                }
+
+                signal_l *= vol_mod;
+                signal_r *= vol_mod;
+
+                let saturated_l = drive_tape_classic(gain_amt, signal_l);
+                let saturated_r = drive_tape_classic(gain_amt, signal_r);
+
+                let filtered_l = one_pole_lp(saturated_l, &mut self.lp_state_l, tape_constants.current_tone_cutoff);
+                let filtered_r = one_pole_lp(saturated_r, &mut self.lp_state_r, tape_constants.current_tone_cutoff);
+
+                *sample_l_ref = filtered_l * makeup_gain;
+                *sample_r_ref = filtered_r * makeup_gain;
+
+            } else {
+                // --- TAPE DELAY MODE ---
+                update_lfo_phase(&mut self.lfo_phase, tape_constants.flutter_rate);
+                let flutter_depth = 15.0;
+                let phase_offset_r = width_amt * std::f32::consts::PI;
+                let flutter_offset_l = self.lfo_phase.sin() * flutter_depth;
+                let flutter_offset_r = (self.lfo_phase + phase_offset_r).sin() * flutter_depth;
+
+                let smooth_coeff = 0.0005;
+                self.current_delay_samples = (self.current_delay_samples * (1.0 - smooth_coeff))
+                    + (target_delay_samples * smooth_coeff);
+
+                let spread_samples = width_amt * 0.010 * sample_rate;
+                let mod_delay_samples_l = (self.current_delay_samples - spread_samples + flutter_offset_l).max(0.0);
+                let mod_delay_samples_r = (self.current_delay_samples + spread_samples + flutter_offset_r).max(0.0);
+
+                let read_pos_l = (self.write_pos as f32 - mod_delay_samples_l).rem_euclid(buffer_len as f32);
+                let read_pos_r = (self.write_pos as f32 - mod_delay_samples_r).rem_euclid(buffer_len as f32);
+
                 let raw_delayed_l = linear_interpolate(&self.delay_buffer_l, read_pos_l);
-
-                let (signal_to_record, output) = process_delay_channel(
-                    input_l,
-                    raw_delayed_l,
-                    &mut self.lp_state_l,
-                    &mut self.rng_seed,
-                    &mut self.crackle_integrator_l,
-                    &mut self.crackle_hp_l,
-                    cutoff_l,
-                    tape_constants.crackle_threshold,
-                    compensated_noise_amt,
-                    compensated_crackle_amt,
-                    feedback_gain,
-                    vol_mod,
-                    gain_amt,
-                    makeup_gain,
-                    mix_amt,
-                );
-
-                if let Some(buf_val) = self.delay_buffer_l.get_mut(self.write_pos) {
-                    *buf_val = signal_to_record;
-                }
-
-                *sample_l = output;
-
-                let abs_l = sample_l.abs();
-                if abs_l > max_amplitude_in_block_l {
-                    max_amplitude_in_block_l = abs_l;
-                }
-            }
-
-            // --- RIGHT CHANNEL PROCESSING ---
-            if let Some(sample_r) = samples.next() {
-                let input_r = *sample_r;
                 let raw_delayed_r = linear_interpolate(&self.delay_buffer_r, read_pos_r);
 
-                let (signal_to_record, output) = process_delay_channel(
-                    input_r,
-                    raw_delayed_r,
-                    &mut self.lp_state_r,
-                    &mut self.rng_seed,
-                    &mut self.crackle_integrator_r,
-                    &mut self.crackle_hp_r,
-                    cutoff_r,
-                    tape_constants.crackle_threshold,
-                    compensated_noise_amt,
-                    compensated_crackle_amt,
-                    feedback_gain,
-                    vol_mod,
-                    gain_amt,
-                    makeup_gain,
-                    mix_amt,
-                );
+                let feedback_gain = (feedback_amt * 1.2) / gain_amt.sqrt();
 
+                let tone_spread = width_amt * 0.15;
+                let cutoff_l = (tape_constants.current_tone_cutoff - tone_spread).max(0.1);
+                let cutoff_r = (tape_constants.current_tone_cutoff + tone_spread).min(0.95);
+
+                let filtered_feedback_l = one_pole_lp(raw_delayed_l, &mut self.lp_state_l, cutoff_l);
+                let filtered_feedback_r = one_pole_lp(raw_delayed_r, &mut self.lp_state_r, cutoff_r);
+
+                let mut signal_to_record_l = input_l + (filtered_feedback_l * feedback_gain) + noise_l + crackle_l;
+                let mut signal_to_record_r = input_r + (filtered_feedback_r * feedback_gain) + noise_r + crackle_r;
+
+                // Apply corrosion if broken
+                if is_broken {
+                    (signal_to_record_l, signal_to_record_r) = self.apply_corrosion(sample_rate, signal_to_record_l, signal_to_record_r);
+                }
+
+                signal_to_record_l *= vol_mod;
+                signal_to_record_r *= vol_mod;
+
+                let saturated_l = drive_tape_classic(gain_amt, signal_to_record_l);
+                let saturated_r = drive_tape_classic(gain_amt, signal_to_record_r);
+
+                if let Some(buf_val) = self.delay_buffer_l.get_mut(self.write_pos) {
+                    *buf_val = saturated_l;
+                }
                 if let Some(buf_val) = self.delay_buffer_r.get_mut(self.write_pos) {
-                    *buf_val = signal_to_record;
+                    *buf_val = saturated_r;
                 }
 
-                *sample_r = output;
+                let wet_l = raw_delayed_l * makeup_gain;
+                let wet_r = raw_delayed_r * makeup_gain;
 
-                let abs_r = sample_r.abs();
-                if abs_r > max_amplitude_in_block_r {
-                    max_amplitude_in_block_r = abs_r;
-                }
+                *sample_l_ref = (input_l * (1.0 - mix_amt)) + (wet_l * mix_amt);
+                *sample_r_ref = (input_r * (1.0 - mix_amt)) + (wet_r * mix_amt);
             }
 
-            // Increment Write Head
-            self.write_pos = (self.write_pos + 1) % buffer_len;
+            // --- METERING ---
+            let abs_l = sample_l_ref.abs();
+            if abs_l > max_amplitude_in_block_l {
+                max_amplitude_in_block_l = abs_l;
+            }
+            let abs_r = sample_r_ref.abs();
+            if abs_r > max_amplitude_in_block_r {
+                max_amplitude_in_block_r = abs_r;
+            }
+
+            // --- ADVANCE WRITE HEAD (only in delay mode) ---
+            if !is_distortion_mode {
+                self.write_pos = (self.write_pos + 1) % buffer_len;
+            }
         }
 
+        // --- UPDATE METERS (Once per buffer block) ---
         update_peak_meters(
             self.params.editor_state.is_open(),
             buffer.samples() as f32,
@@ -651,6 +570,121 @@ impl Plugin for TapeDelay {
             self.params.editor_state.clone(),
         )
     }
+}
+
+impl TapeDelay {
+
+    /// Fractional delay buffer reader using linear interpolation.
+    /// `buf` is a circular delay buffer, `write_pos` is the current write head,
+    /// `delay_samples` is the number of samples to look back (may be fractional).
+    fn corrosion_read(buf: &[f32], write_pos: usize, delay_samples: f32) -> f32 {
+        let len = buf.len();
+        let delay_i = delay_samples as usize;
+        let frac = delay_samples - delay_i as f32;
+
+        // Clamp so we never exceed the buffer length
+        let delay_i = delay_i.min(len - 1);
+
+        // Read head (going backward from the write position)
+        let idx0 = (write_pos + len - delay_i) % len;
+        let idx1 = (write_pos + len - delay_i - 1) % len;
+
+        // Linear interpolation between the two adjacent samples
+        buf[idx0] + frac * (buf[idx1] - buf[idx0])
+    }
+
+    fn apply_corrosion(&mut self, sample_rate: f32, driven_l: f32, driven_r: f32) -> (f32, f32) {
+        let corr_amount = 0.22;
+        let (corr_l, corr_r) = if corr_amount > 0.0 {
+            let corr_freq: f32 = 911.0;
+            let corr_width: f32 = 2.0;
+            let corr_blend: f32 = 1.0;
+            let corr_stereo: f32 = 0.75;
+
+            // Constants matching the Ableton 12.4 spec
+            const BASE_DELAY: f32 = 0.002; // 2 ms
+            const MAX_MOD_DEPTH: f32 = 0.001; // 1 ms max fluctuation
+
+            // 1. Sine modulators (stereo phase offset)
+            let sine_l = (self.corrosion_sine_phase * std::f32::consts::TAU).sin();
+            let sine_r = ((self.corrosion_sine_phase * std::f32::consts::TAU)
+                + corr_stereo * std::f32::consts::PI)
+                .sin();
+            self.corrosion_sine_phase =
+                (self.corrosion_sine_phase + corr_freq / sample_rate).fract();
+
+            // 2. Independent white noise for each channel (LCG)
+            self.corrosion_rng = self
+                .corrosion_rng
+                .wrapping_mul(1_664_525)
+                .wrapping_add(1_013_904_223);
+            let raw_noise_l = (self.corrosion_rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+            self.corrosion_rng = self
+                .corrosion_rng
+                .wrapping_mul(1_664_525)
+                .wrapping_add(1_013_904_223);
+            let raw_noise_r = (self.corrosion_rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+
+            // 3. Bandpass-filter noise (2nd-order approximation: LP then HP derived
+            //    from LP; bandwidth controlled by corr_width)
+            let lp_cutoff = (corr_freq * corr_width.max(0.01)).min(sample_rate * 0.499);
+            let hp_cutoff = (corr_freq / corr_width.max(0.01).max(1.0)).max(1.0);
+            let dt = 1.0 / sample_rate;
+            let lp_a = dt / (1.0 / (std::f32::consts::TAU * lp_cutoff) + dt);
+            let hp_a = dt / (1.0 / (std::f32::consts::TAU * hp_cutoff) + dt);
+
+            // Left channel BP
+            self.corrosion_bp_l[0] += lp_a * (raw_noise_l - self.corrosion_bp_l[0]);
+            let lp_l = self.corrosion_bp_l[0];
+            self.corrosion_bp_l[1] += hp_a * (lp_l - self.corrosion_bp_l[1]);
+            let bp_l = lp_l - self.corrosion_bp_l[1]; // bandpass = LP - LP-of-LP
+
+            // Right channel BP
+            self.corrosion_bp_r[0] += lp_a * (raw_noise_r - self.corrosion_bp_r[0]);
+            let lp_r = self.corrosion_bp_r[0];
+            self.corrosion_bp_r[1] += hp_a * (lp_r - self.corrosion_bp_r[1]);
+            let bp_r = lp_r - self.corrosion_bp_r[1];
+
+            // 4. Stereo decorrelation for noise (lerp from mono L → uncorrelated R)
+            let noise_l = bp_l;
+            let noise_r = noise_l + corr_stereo * (bp_r - noise_l);
+
+            // 5. Noise-blend: crossfade sine <-> bandpassed noise
+            let mod_l = sine_l + corr_blend * (noise_l - sine_l);
+            let mod_r = sine_r + corr_blend * (noise_r - sine_r);
+
+            // 6. Convert modulation signal to delay time in samples
+            let delay_samples_l =
+                (BASE_DELAY + mod_l * corr_amount * MAX_MOD_DEPTH).max(0.0) * sample_rate;
+            let delay_samples_r =
+                (BASE_DELAY + mod_r * corr_amount * MAX_MOD_DEPTH).max(0.0) * sample_rate;
+
+            // 7. Write input to delay buffers
+            let buf_len = self.corrosion_buf_l.len();
+            self.corrosion_buf_l[self.corrosion_write] = driven_l;
+            self.corrosion_buf_r[self.corrosion_write] = driven_r;
+
+            // 8. Read back with linear interpolation at the modulated delay time
+            let read_l = Self::corrosion_read(
+                &self.corrosion_buf_l,
+                self.corrosion_write,
+                delay_samples_l,
+            );
+            let read_r = Self::corrosion_read(
+                &self.corrosion_buf_r,
+                self.corrosion_write,
+                delay_samples_r,
+            );
+
+            self.corrosion_write = (self.corrosion_write + 1) % buf_len;
+
+            (read_l, read_r)
+        } else {
+            (driven_l, driven_r)
+        };
+        (corr_l, corr_r)
+    }
+
 }
 
 pub fn normalized_to_sync_step(normalized: f32) -> i32 {
@@ -699,11 +733,21 @@ fn one_pole_lp(input: f32, state: &mut f32, cutoff: f32) -> f32 {
     *state
 }
 
-// Helper: A simple soft clipper using tanh (The "Tape Saturation")
-// This keeps your feedback from exploding.
-fn soft_clip(sample: f32, drive: f32) -> f32 {
-    // 'drive' allows us to push into the saturation harder
-    (sample * drive).tanh()
+
+// Tape Saturation Type 1: Classic Analog Tape (Soft Knee)
+// Models vintage tape machines with smooth, musical saturation and hysteresis-like behavior
+fn drive_tape_classic(drive: f32, signal: f32) -> f32 {
+    let x = signal * drive;
+
+    // Soft saturation curve with tape-like compression
+    let saturated = if x.abs() < 0.5 {
+        x * (1.0 - 0.15 * x.abs())
+    } else {
+        let sign = x.signum();
+        sign * (0.425 + 0.575 * (1.0 - (-(x.abs() - 0.5) * 3.0).exp()))
+    };
+
+    saturated
 }
 
 // Helper: Simple pseudo-random noise generator (for Dust/Hiss)
@@ -874,76 +918,6 @@ fn generate_tape_noise_and_crackle(
     // Apply volume
     let crackle = output * compensated_crackle_amt;
     (noise, crackle)
-}
-
-#[inline]
-fn process_direct_distortion_channel(
-    input: f32,
-    lp_state: &mut f32,
-    rng_seed: &mut u32,
-    crackle_integrator: &mut f32,
-    crackle_hp: &mut f32,
-    tone_cutoff: f32,
-    crackle_threshold: f32,
-    compensated_noise_amt: f32,
-    compensated_crackle_amt: f32,
-    vol_mod: f32,
-    gain_amt: f32,
-    makeup_gain: f32,
-) -> f32 {
-    let (noise, crackle) = generate_tape_noise_and_crackle(
-        rng_seed,
-        crackle_integrator,
-        crackle_hp,
-        crackle_threshold,
-        compensated_noise_amt,
-        compensated_crackle_amt,
-    );
-
-    let mut signal = input + noise + crackle;
-    signal *= vol_mod;
-    signal = soft_clip(signal, gain_amt);
-
-    let filtered_output = one_pole_lp(signal, lp_state, tone_cutoff);
-    filtered_output * makeup_gain
-}
-
-#[inline]
-fn process_delay_channel(
-    input: f32,
-    raw_delayed: f32,
-    lp_state: &mut f32,
-    rng_seed: &mut u32,
-    crackle_integrator: &mut f32,
-    crackle_hp: &mut f32,
-    tone_cutoff: f32,
-    crackle_threshold: f32,
-    compensated_noise_amt: f32,
-    compensated_crackle_amt: f32,
-    feedback_gain: f32,
-    vol_mod: f32,
-    gain_amt: f32,
-    makeup_gain: f32,
-    mix_amt: f32,
-) -> (f32, f32) {
-    let (noise, crackle) = generate_tape_noise_and_crackle(
-        rng_seed,
-        crackle_integrator,
-        crackle_hp,
-        crackle_threshold,
-        compensated_noise_amt,
-        compensated_crackle_amt,
-    );
-
-    let filtered_feedback = one_pole_lp(raw_delayed, lp_state, tone_cutoff);
-    let mut signal_to_record = input + (filtered_feedback * feedback_gain) + noise + crackle;
-    signal_to_record *= vol_mod;
-    signal_to_record = soft_clip(signal_to_record, gain_amt);
-
-    let wet_signal = raw_delayed * makeup_gain;
-    let output = (input * (1.0 - mix_amt)) + (wet_signal * mix_amt);
-
-    (signal_to_record, output)
 }
 
 #[inline]

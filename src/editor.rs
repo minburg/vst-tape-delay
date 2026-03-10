@@ -94,7 +94,7 @@ pub(crate) fn create(
                                 nih_log!("Failed to open browser: {}", e);
                             }
                         });
-                    Label::new(cx, "v0.1.11").class("header-version-title");
+                    Label::new(cx, "v0.1.12").class("header-version-title");
                     Element::new(cx)
                         .class("insta-button")
                         .on_press(|_| {
