@@ -4039,7 +4039,7 @@ dependencies = [
 
 [[package]]
 name = "tape_delay"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "image",
  "nih_plug",
