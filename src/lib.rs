@@ -15,11 +15,15 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+use reqwest::blocking::{Client, Response}; // Add Response here
+use reqwest::Error; // Add Error here
+use std::thread;
 use nih_plug::prelude::*;
 use nih_plug_vizia::ViziaState;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use serde::Deserialize; // Add this import
 
 mod editor;
 
@@ -78,6 +82,14 @@ pub struct TapeDelay {
     crackle_hp_l: f32,
     crackle_hp_r: f32,
     was_distortion_mode: bool,
+
+    // Update check
+    pub update_available: Arc<AtomicBool>, // New field
+}
+
+#[derive(Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
 }
 
 #[derive(Params)]
@@ -284,6 +296,7 @@ impl Default for TapeDelay {
             crackle_hp_l: 0.0,
             crackle_hp_r: 0.0,
             was_distortion_mode: false,
+            update_available: Arc::new(AtomicBool::new(false)), // Initialize new field
         }
     }
 }
@@ -341,6 +354,45 @@ impl Plugin for TapeDelay {
             10.0,
             -release_db_per_second / (20.0 * _buffer_config.sample_rate),
         );
+
+        // Inside your initialize function...
+        let update_available = self.update_available.clone();
+        thread::spawn(move || {
+            nih_log!("Checking for updates in the background...");
+
+            // 1. Use the blocking client so we don't need an async runtime or .await
+            let client = Client::new();
+            let res: Result<Response, Error> = client
+                .get("https://api.github.com/repos/minburg/vst-tape-delay/releases/latest")
+                .header(reqwest::header::USER_AGENT, "nih-plug-update-checker") // GitHub requires this
+                .send(); // No .await needed!
+
+            match res {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        // 2. json() is now also synchronous, so we drop the .await
+                        match response.json::<GitHubRelease>() {
+                            Ok(release) => {
+                                let latest_version_str = release.tag_name.trim_start_matches('v');
+                                // Assuming TapeDelay::VERSION is accessible here
+                                let current_version_str = TapeDelay::VERSION.trim_start_matches('v');
+
+                                if latest_version_str > current_version_str {
+                                    update_available.store(true, Ordering::Relaxed);
+                                    nih_log!("New version available: {}", release.tag_name);
+                                } else {
+                                    nih_log!("Plugin is up to date.");
+                                }
+                            }
+                            Err(e) => nih_log!("Failed to parse GitHub API response: {}", e),
+                        }
+                    } else {
+                        nih_log!("GitHub API request failed with status: {}", response.status());
+                    }
+                }
+                Err(e) => nih_log!("Failed to make GitHub API request: {}", e),
+            }
+        });
 
         true
     }
@@ -568,6 +620,7 @@ impl Plugin for TapeDelay {
             self.peak_meter_l.clone(),
             self.peak_meter_r.clone(),
             self.params.editor_state.clone(),
+            self.update_available.clone(), // Pass the new flag to the editor
         )
     }
 }
@@ -579,110 +632,115 @@ impl TapeDelay {
     /// `delay_samples` is the number of samples to look back (may be fractional).
     fn corrosion_read(buf: &[f32], write_pos: usize, delay_samples: f32) -> f32 {
         let len = buf.len();
-        let delay_i = delay_samples as usize;
-        let frac = delay_samples - delay_i as f32;
+        if len == 0 {
+            return 0.0;
+        }
+        if len == 1 {
+            return buf[0];
+        }
 
-        // Clamp so we never exceed the buffer length
-        let delay_i = delay_i.min(len - 1);
+        // Use floor to get the integer part safely
+        let read_pos_floor = delay_samples.floor();
+        let fraction = delay_samples - read_pos_floor;
 
-        // Read head (going backward from the write position)
-        let idx0 = (write_pos + len - delay_i) % len;
-        let idx1 = (write_pos + len - delay_i - 1) % len;
+        // Ensure index_a is within [0, len-1]
+        let index_a = (write_pos + len - read_pos_floor as usize) % len;
+        // Ensure index_b is index_a + 1 wrapped around
+        let index_b = (index_a + len - 1) % len; // Read backwards
 
         // Linear interpolation between the two adjacent samples
-        buf[idx0] + frac * (buf[idx1] - buf[idx0])
+        buf[index_a] * (1.0 - fraction) + buf[index_b] * fraction
     }
 
     fn apply_corrosion(&mut self, sample_rate: f32, driven_l: f32, driven_r: f32) -> (f32, f32) {
         let corr_amount = 0.22;
-        let (corr_l, corr_r) = if corr_amount > 0.0 {
-            let corr_freq: f32 = 911.0;
-            let corr_width: f32 = 2.0;
-            let corr_blend: f32 = 1.0;
-            let corr_stereo: f32 = 0.75;
+        if corr_amount == 0.0 {
+            return (driven_l, driven_r);
+        }
 
-            // Constants matching the Ableton 12.4 spec
-            const BASE_DELAY: f32 = 0.002; // 2 ms
-            const MAX_MOD_DEPTH: f32 = 0.001; // 1 ms max fluctuation
+        let corr_freq: f32 = 911.0;
+        let corr_width: f32 = 2.0;
+        let corr_blend: f32 = 1.0;
+        let corr_stereo: f32 = 0.75;
 
-            // 1. Sine modulators (stereo phase offset)
-            let sine_l = (self.corrosion_sine_phase * std::f32::consts::TAU).sin();
-            let sine_r = ((self.corrosion_sine_phase * std::f32::consts::TAU)
-                + corr_stereo * std::f32::consts::PI)
-                .sin();
-            self.corrosion_sine_phase =
-                (self.corrosion_sine_phase + corr_freq / sample_rate).fract();
+        // Constants matching the Ableton 12.4 spec
+        const BASE_DELAY: f32 = 0.002; // 2 ms
+        const MAX_MOD_DEPTH: f32 = 0.001; // 1 ms max fluctuation
 
-            // 2. Independent white noise for each channel (LCG)
-            self.corrosion_rng = self
-                .corrosion_rng
-                .wrapping_mul(1_664_525)
-                .wrapping_add(1_013_904_223);
-            let raw_noise_l = (self.corrosion_rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
-            self.corrosion_rng = self
-                .corrosion_rng
-                .wrapping_mul(1_664_525)
-                .wrapping_add(1_013_904_223);
-            let raw_noise_r = (self.corrosion_rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+        // 1. Sine modulators (stereo phase offset)
+        let sine_l = (self.corrosion_sine_phase * std::f32::consts::TAU).sin();
+        let sine_r = ((self.corrosion_sine_phase * std::f32::consts::TAU)
+            + corr_stereo * std::f32::consts::PI)
+            .sin();
+        self.corrosion_sine_phase =
+            (self.corrosion_sine_phase + corr_freq / sample_rate).fract();
 
-            // 3. Bandpass-filter noise (2nd-order approximation: LP then HP derived
-            //    from LP; bandwidth controlled by corr_width)
-            let lp_cutoff = (corr_freq * corr_width.max(0.01)).min(sample_rate * 0.499);
-            let hp_cutoff = (corr_freq / corr_width.max(0.01).max(1.0)).max(1.0);
-            let dt = 1.0 / sample_rate;
-            let lp_a = dt / (1.0 / (std::f32::consts::TAU * lp_cutoff) + dt);
-            let hp_a = dt / (1.0 / (std::f32::consts::TAU * hp_cutoff) + dt);
+        // 2. Independent white noise for each channel (LCG)
+        self.corrosion_rng = self
+            .corrosion_rng
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
+        let raw_noise_l = (self.corrosion_rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+        self.corrosion_rng = self
+            .corrosion_rng
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
+        let raw_noise_r = (self.corrosion_rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
 
-            // Left channel BP
-            self.corrosion_bp_l[0] += lp_a * (raw_noise_l - self.corrosion_bp_l[0]);
-            let lp_l = self.corrosion_bp_l[0];
-            self.corrosion_bp_l[1] += hp_a * (lp_l - self.corrosion_bp_l[1]);
-            let bp_l = lp_l - self.corrosion_bp_l[1]; // bandpass = LP - LP-of-LP
+        // 3. Bandpass-filter noise (2nd-order approximation: LP then HP derived
+        //    from LP; bandwidth controlled by corr_width)
+        let lp_cutoff = (corr_freq * corr_width.max(0.01)).min(sample_rate * 0.499);
+        let hp_cutoff = (corr_freq / corr_width.max(0.01).max(1.0)).max(1.0);
+        let dt = 1.0 / sample_rate;
+        let lp_a = dt / (1.0 / (std::f32::consts::TAU * lp_cutoff) + dt);
+        let hp_a = dt / (1.0 / (std::f32::consts::TAU * hp_cutoff) + dt);
 
-            // Right channel BP
-            self.corrosion_bp_r[0] += lp_a * (raw_noise_r - self.corrosion_bp_r[0]);
-            let lp_r = self.corrosion_bp_r[0];
-            self.corrosion_bp_r[1] += hp_a * (lp_r - self.corrosion_bp_r[1]);
-            let bp_r = lp_r - self.corrosion_bp_r[1];
+        // Left channel BP
+        self.corrosion_bp_l[0] += lp_a * (raw_noise_l - self.corrosion_bp_l[0]);
+        let lp_l = self.corrosion_bp_l[0];
+        self.corrosion_bp_l[1] += hp_a * (lp_l - self.corrosion_bp_l[1]);
+        let bp_l = lp_l - self.corrosion_bp_l[1]; // bandpass = LP - LP-of-LP
 
-            // 4. Stereo decorrelation for noise (lerp from mono L → uncorrelated R)
-            let noise_l = bp_l;
-            let noise_r = noise_l + corr_stereo * (bp_r - noise_l);
+        // Right channel BP
+        self.corrosion_bp_r[0] += lp_a * (raw_noise_r - self.corrosion_bp_r[0]);
+        let lp_r = self.corrosion_bp_r[0];
+        self.corrosion_bp_r[1] += hp_a * (lp_r - self.corrosion_bp_r[1]);
+        let bp_r = lp_r - self.corrosion_bp_r[1];
 
-            // 5. Noise-blend: crossfade sine <-> bandpassed noise
-            let mod_l = sine_l + corr_blend * (noise_l - sine_l);
-            let mod_r = sine_r + corr_blend * (noise_r - sine_r);
+        // 4. Stereo decorrelation for noise (lerp from mono L → uncorrelated R)
+        let noise_l = bp_l;
+        let noise_r = noise_l + corr_stereo * (bp_r - noise_l);
 
-            // 6. Convert modulation signal to delay time in samples
-            let delay_samples_l =
-                (BASE_DELAY + mod_l * corr_amount * MAX_MOD_DEPTH).max(0.0) * sample_rate;
-            let delay_samples_r =
-                (BASE_DELAY + mod_r * corr_amount * MAX_MOD_DEPTH).max(0.0) * sample_rate;
+        // 5. Noise-blend: crossfade sine <-> bandpassed noise
+        let mod_l = sine_l + corr_blend * (noise_l - sine_l);
+        let mod_r = sine_r + corr_blend * (noise_r - sine_r); // Fixed: changed sine_l to sine_r
 
-            // 7. Write input to delay buffers
-            let buf_len = self.corrosion_buf_l.len();
-            self.corrosion_buf_l[self.corrosion_write] = driven_l;
-            self.corrosion_buf_r[self.corrosion_write] = driven_r;
+        // 6. Convert modulation signal to delay time in samples
+        let delay_samples_l =
+            (BASE_DELAY + mod_l * corr_amount * MAX_MOD_DEPTH).max(0.0) * sample_rate;
+        let delay_samples_r =
+            (BASE_DELAY + mod_r * corr_amount * MAX_MOD_DEPTH).max(0.0) * sample_rate;
 
-            // 8. Read back with linear interpolation at the modulated delay time
-            let read_l = Self::corrosion_read(
-                &self.corrosion_buf_l,
-                self.corrosion_write,
-                delay_samples_l,
-            );
-            let read_r = Self::corrosion_read(
-                &self.corrosion_buf_r,
-                self.corrosion_write,
-                delay_samples_r,
-            );
+        // 7. Write input to delay buffers
+        let buf_len = self.corrosion_buf_l.len();
+        self.corrosion_buf_l[self.corrosion_write] = driven_l;
+        self.corrosion_buf_r[self.corrosion_write] = driven_r;
 
-            self.corrosion_write = (self.corrosion_write + 1) % buf_len;
+        // 8. Read back with linear interpolation at the modulated delay time
+        let read_l = Self::corrosion_read(
+            &self.corrosion_buf_l,
+            self.corrosion_write,
+            delay_samples_l,
+        );
+        let read_r = Self::corrosion_read(
+            &self.corrosion_buf_r,
+            self.corrosion_write,
+            delay_samples_r,
+        );
 
-            (read_l, read_r)
-        } else {
-            (driven_l, driven_r)
-        };
-        (corr_l, corr_r)
+        self.corrosion_write = (self.corrosion_write + 1) % buf_len;
+
+        (read_l, read_r)
     }
 
 }

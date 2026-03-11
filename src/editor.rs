@@ -9,7 +9,7 @@ use nih_plug_vizia::assets::register_noto_sans_light;
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::widgets::ResizeHandle;
 use nih_plug_vizia::widgets::{RawParamEvent,ParamEvent};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::editor::my_peak_meter::MyPeakMeter;
@@ -49,6 +49,7 @@ pub(crate) fn create(
     peak_meter_l: Arc<AtomicF32>,
     peak_meter_r: Arc<AtomicF32>,
     editor_state: Arc<ViziaState>,
+    update_available: Arc<AtomicBool>
 ) -> Option<Box<dyn Editor>> {
     create_vizia_editor(editor_state, ViziaTheming::Custom, move |cx, _| {
         register_noto_sans_light(cx);
@@ -83,11 +84,13 @@ pub(crate) fn create(
         }
         .build(cx);
 
+        let update_text = if update_available.load(Ordering::Relaxed) { "New Version available!" } else { "Check for Updates" };
+
         VStack::new(cx, |cx| {
             VStack::new(cx, |cx| {
                 Label::new(cx, "CONVOLUTION'S TAPE DELAY").class("header-title");
                 HStack::new(cx, |cx| {
-                    Label::new(cx, "Check for Updates")
+                    Label::new(cx, update_text)
                         .class("update-link")
                         .on_press(|_| {
                             if let Err(e) = webbrowser::open("https://github.com/minburg/vst-tape-delay/releases") {
